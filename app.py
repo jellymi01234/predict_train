@@ -1,7 +1,8 @@
 # app.py ── Streamlit (https://<YOUR-APP>.streamlit.app)
+
 import io
 from pathlib import Path
-from datetime import date
+from datetime import date, timedelta
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -11,11 +12,59 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Passengers & Sales (Dual Axis)", layout="wide")
 st.title("📈 외부요인 기반 철도수요예측 시스템")
 
-# ================= 사이드바 옵션 =================
-st.sidebar.header("🧰 옵션")
-interpolate_missing = st.sidebar.checkbox("결측치 보간(선 끊김 방지)", value=False)
-use_rolling = st.sidebar.checkbox("이동평균(스무딩)", value=False)
-window = st.sidebar.slider("이동평균 윈도우(일)", 2, 14, 3, 1, disabled=not use_rolling)
+# ---- 글로벌 스타일: 간격/카드/패널/배지 ----
+st.markdown(
+    """
+    <style>
+    .gap-xl { height: 16px; }
+    .panel {
+        border: 1px solid #E5E7EB;
+        background: #F8FAFC;
+        border-radius: 10px;
+        padding: 12px 14px;
+        box-shadow: inset 0 0 0 9999px rgba(148,163,184,0.04);
+        margin-bottom: 8px;
+    }
+    .panel-tight {
+        border: 1px solid #E5E7EB;
+        background: #FFFFFF;
+        border-radius: 10px;
+        padding: 10px 12px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        margin-bottom: 8px;
+    }
+    .card-slim {
+        border: 1px solid #E5E7EB;
+        background: #FFFFFF;
+        border-radius: 8px;
+        padding: 10px 12px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    .card-slim h4 { font-size: 15px; margin: 0 0 6px 0; }
+    .metric { font-weight: 700; font-size: 17px; margin: 2px 0; }
+    .delta-up   { color: #1D4ED8; font-weight: 700; }  /* 파란색(상승) */
+    .delta-down { color: #DC2626; font-weight: 700; }  /* 빨간색(하락) */
+    .muted { color: #6B7280; font-size: 12px; margin-top: 4px; }
+
+    /* 범례 스와치 */
+    .lg-swatch { display:inline-block; width:14px; height:6px; margin-right:6px; border-radius:2px; }
+    .lg-line   { height:2px; border-top: 4px solid #1f77b4; border-radius:2px; display:inline-block; width:18px; margin-right:6px; }
+    .lg-bar    { background:#ff7f0e; display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; }
+    .lg-text   { font-size: 13px; color:#111827; vertical-align:middle; }
+
+    .legend-row { display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
+    .legend-item { display:flex; gap:8px; align-items:center; }
+    </style>
+    <div class="gap-xl"></div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ===== 기간 정의 =====
+ACT_START = pd.to_datetime("2020-08-01")
+ACT_END   = pd.to_datetime("2025-08-31")
+FCT_START = pd.to_datetime("2025-09-01")
+FCT_END   = pd.to_datetime("2025-11-29")
 
 # ================= 파일 로더 =================
 @st.cache_data(show_spinner=False)
@@ -30,12 +79,6 @@ def load_df_from_repo_csv(filename: str):
         except Exception:
             continue
     return pd.read_csv(path)
-
-# ===== 기간 정의 =====
-ACT_START = pd.to_datetime("2020-08-01")
-ACT_END   = pd.to_datetime("2025-08-31")
-FCT_START = pd.to_datetime("2025-09-01")
-FCT_END   = pd.to_datetime("2025-11-29")
 
 # ================= 실적 데이터 (merged.csv) =================
 @st.cache_data(show_spinner=False)
@@ -73,10 +116,7 @@ def load_forecast_df() -> pd.DataFrame:
 # ================= 예측 매출 로더 (forecast_sales.csv / .cvs 폴백) =================
 @st.cache_data(show_spinner=False)
 def load_forecast_sales_df() -> pd.DataFrame:
-    """
-    forecast_sales.csv(우선) → forecast_sales.cvs(폴백)에서
-    date, forecast_90d를 읽어 pred_sales_amount로 반환
-    """
+    """forecast_sales.csv 우선 → forecast_sales.cvs 폴백"""
     try:
         f = load_df_from_repo_csv("forecast_sales.csv").copy()
     except FileNotFoundError:
@@ -96,12 +136,7 @@ def load_forecast_sales_df() -> pd.DataFrame:
 # ================= 실적 로더 (train_reservations_rows.csv) =================
 @st.cache_data(show_spinner=False)
 def load_actual_rows_df() -> pd.DataFrame:
-    """
-    train_reservations_rows.csv에서 일자별 실적 집계
-    - 입력 컬럼: travel_date, passengers, sales_amount
-    - 쉼표 제거 후 float 변환
-    - 일자별 합계 반환 (date, passengers, sales_amount)
-    """
+    """rows에서 일자별 합계 생성"""
     df = load_df_from_repo_csv("train_reservations_rows.csv").copy()
     required = ["travel_date", "passengers", "sales_amount"]
     miss = [c for c in required if c not in df.columns]
@@ -126,387 +161,407 @@ def load_actual_rows_df() -> pd.DataFrame:
     )
     return daily
 
-# ================= 기간 선택 (예측기간만) =================
-data_min = FCT_START.date()
-data_max = FCT_END.date()
+# ================= 유틸: 기간 보정/동일 길이 =================
+def ensure_in_range(s: pd.Timestamp, e: pd.Timestamp, lo: pd.Timestamp, hi: pd.Timestamp):
+    s2 = max(s, lo); e2 = min(e, hi)
+    if s2 > e2: s2, e2 = lo, lo
+    return s2, e2
 
-start_date, end_date = st.session_state.get("selected_range", (data_min, data_max))
-tl, tr = st.columns([0.78, 0.22])
-with tl:
-    st.subheader("예측그래프")
-with tr:
-    with st.popover("📅 기간 설정", use_container_width=True):
-        sel = st.date_input("시작일 / 종료일 (예측기간만)",
-                            value=(start_date, end_date),
-                            min_value=data_min, max_value=data_max,
-                            key="range_picker_v5")
-        if isinstance(sel, tuple):
-            sel_start, sel_end = sel
-        else:
-            sel_start, sel_end = sel, sel
-        st.caption("선택기간 길이(N일)과 동일한 이전 N일 데이터를 함께 표시합니다.")
-start_date, end_date = pd.to_datetime(sel_start), pd.to_datetime(sel_end)
-start_date = max(start_date, FCT_START)
-end_date   = min(end_date,   FCT_END)
-if start_date > end_date:
-    st.stop()
-st.session_state["selected_range"] = (start_date.date(), end_date.date())
+def align_last_year_same_weekday(r_s: pd.Timestamp, n_days: int):
+    """전년도 동일(요일) 시작일 계산 → 시작 요일을 맞춘 후 n일 길이 확보"""
+    raw = (r_s - pd.DateOffset(years=1)).normalize()
+    diff = (r_s.weekday() - raw.weekday()) % 7
+    l_s = raw + pd.Timedelta(days=diff)
+    l_e = l_s + pd.Timedelta(days=n_days-1)
+    l_s, l_e = ensure_in_range(l_s, l_e, ACT_START, ACT_END)
+    cur = (l_e - l_s).days + 1
+    if cur < n_days:
+        deficit = n_days - cur
+        l_s = max(ACT_START, l_s - pd.Timedelta(days=deficit))
+        l_e = l_s + pd.Timedelta(days=n_days-1)
+    return ensure_in_range(l_s, l_e, ACT_START, ACT_END)
 
-# ================= 이전기간 계산 =================
-N_days = (end_date - start_date).days + 1
-prev_end   = start_date - pd.Timedelta(days=1)
-prev_start = prev_end - pd.Timedelta(days=N_days - 1)
+def force_same_length(left_s, left_e, right_s, right_e):
+    n = (right_e - right_s).days + 1
+    left_e_target = left_s + pd.Timedelta(days=n-1)
+    left_s2, left_e2 = ensure_in_range(left_s, left_e_target, ACT_START, ACT_END)
+    cur = (left_e2 - left_s2).days + 1
+    if cur < n:
+        deficit = n - cur
+        left_s2 = max(ACT_START, left_s2 - pd.Timedelta(days=deficit))
+    left_s2, left_e2 = ensure_in_range(left_s2, left_s2 + pd.Timedelta(days=n-1), ACT_START, ACT_END)
+    right_s2, right_e2 = ensure_in_range(right_s, right_e, FCT_START, FCT_END)
+    return left_s2, left_e2, right_s2, right_e2
 
-# ================= 데이터 로드 및 병합 =================
+# ===================== 사이드바: 기간 선택 =====================
+st.sidebar.markdown("---")
+st.sidebar.subheader("📅 기간 선택")
+
+# 예측 기간
+default_right_start = date(2025, 9, 1)
+default_right_end   = date(2025, 9, 7)
+right_range = st.session_state.get("right_range", (default_right_start, default_right_end))
+
+right_sel = st.sidebar.date_input(
+    "① 예측 기간 (YYYY-MM-DD)",
+    value=right_range,
+    min_value=FCT_START.date(), max_value=FCT_END.date(),
+    key="right_picker_sidebar"
+)
+
+# 실적 기간 모드
+left_mode = st.sidebar.radio(
+    "② 실적 기간 모드",
+    options=["사용 안 함 (예측만)", "전년도 동일(일자)", "전년도 동일(요일)", "사용자 지정"],
+    index=1,
+    key="left_mode_sidebar"
+)
+
+left_sel = None
+if left_mode == "사용자 지정":
+    left_range = st.session_state.get("left_range", (date(2024, 9, 1), date(2024, 9, 7)))
+    left_sel = st.sidebar.date_input(
+        "실적 기간 (YYYY-MM-DD)",
+        value=left_range,
+        min_value=ACT_START.date(), max_value=ACT_END.date(),
+        key="left_picker_sidebar"
+    )
+
+# ================= 기간 정규화/동기화 =================
+def norm_tuple(sel):
+    if isinstance(sel, tuple):
+        return sel[0], sel[1]
+    return sel, sel
+
+r_s, r_e = norm_tuple(right_sel)
+r_s, r_e = pd.to_datetime(r_s), pd.to_datetime(r_e)
+r_s, r_e = ensure_in_range(r_s, r_e, FCT_START, FCT_END)
+N_days = (r_e - r_s).days + 1
+
+if left_mode == "사용 안 함 (예측만)":
+    l_s, l_e = None, None
+elif left_mode == "전년도 동일(일자)":
+    l_s = (r_s - pd.DateOffset(years=1)).normalize()
+    l_e = l_s + pd.Timedelta(days=N_days-1)
+    l_s, l_e = ensure_in_range(l_s, l_e, ACT_START, ACT_END)
+elif left_mode == "전년도 동일(요일)":
+    l_s, l_e = align_last_year_same_weekday(r_s, N_days)
+else:  # 사용자 지정
+    l_s, l_e = norm_tuple(left_sel)
+    l_s, l_e = pd.to_datetime(l_s), pd.to_datetime(l_e)
+    l_s, l_e, r_s, r_e = force_same_length(l_s, l_e, r_s, r_e)
+
+# 세션 저장
+st.session_state["right_range"] = (r_s.date(), r_e.date())
+if left_mode == "사용자 지정" and l_s is not None:
+    st.session_state["left_range"] = (l_s.date(), l_e.date())
+
+# ================= 데이터 로드 & 가공 =================
 actual_df_all   = load_actual_df()
 forecast_df_all = load_forecast_df()
-# 예측 매출(없어도 앱이 죽지 않도록 보호)
 try:
     forecast_sales_all = load_forecast_sales_df()
 except FileNotFoundError as e:
     st.warning(f"예측 매출 파일을 찾을 수 없어 매출 예측선을 그리지 못할 수 있습니다: {e}")
     forecast_sales_all = pd.DataFrame(columns=["date", "pred_sales_amount"])
 
-def get_union_range(s, e):
-    parts = []
-    if not (e < ACT_START or s > ACT_END):
-        a = actual_df_all[(actual_df_all["date"] >= s) & (actual_df_all["date"] <= e)]
-        a = a.assign(source="actual")
-        parts.append(a)
-    if not (e < FCT_START or s > FCT_END):
-        f = forecast_df_all[(forecast_df_all["date"] >= s) & (forecast_df_all["date"] <= e)]
-        f = f.assign(source="forecast")
-        parts.append(f)
-    if parts:
-        return pd.concat(parts, ignore_index=True).sort_values("date")
-    return pd.DataFrame(columns=["date", "passengers", "sales_amount", "source"])
+def get_range(df, s, e, tag):
+    if s is None or e is None:
+        return pd.DataFrame(columns=["date","passengers","sales_amount","source"])
+    out = df[(df["date"] >= s) & (df["date"] <= e)].copy()
+    out["source"] = tag
+    return out
 
-prev_df = get_union_range(prev_start, prev_end)
-curr_df = get_union_range(start_date, end_date)
-df_sel = pd.concat([
-    prev_df.assign(period="이전기간"),
-    curr_df.assign(period="선택기간")
-], ignore_index=True).sort_values("date")
+left_df  = get_range(actual_df_all,   l_s, l_e, "actual") if l_s is not None else pd.DataFrame(columns=["date","passengers","sales_amount","source"])
+right_df = get_range(forecast_df_all, r_s, r_e, "forecast")
 
-# --- 예측 매출 주입: 예측 구간(source=='forecast')에 pred_sales를 채워 선이 끊기지 않게 함
-df_sel = df_sel.merge(forecast_sales_all, on="date", how="left")
-df_sel["sales_amount"] = np.where(
-    df_sel["source"].eq("forecast") & df_sel["sales_amount"].isna(),
-    df_sel["pred_sales_amount"],
-    df_sel["sales_amount"]
-)
+df_sel = pd.concat(
+    ([left_df.assign(period="실적기간")] if not left_df.empty else []) +
+    [right_df.assign(period="예측기간")],
+    ignore_index=True
+).sort_values("date") if (not right_df.empty or not left_df.empty) else pd.DataFrame(columns=["date","passengers","sales_amount","source","period"])
 
-# 전처리(보간/스무딩은 주입된 sales_amount에 대해 적용)
-if interpolate_missing and not df_sel.empty:
-    df_sel = (df_sel.set_index("date")
-              .groupby("period", group_keys=False)
-              .apply(lambda g: g[["passengers","sales_amount"]]
-                     .resample("D").asfreq()
-              ).reset_index())
-    df_sel[["passengers","sales_amount"]] = df_sel[["passengers","sales_amount"]].interpolate(method="time")
-
-if use_rolling and not df_sel.empty:
-    df_sel[["passengers","sales_amount"]] = (
-        df_sel.groupby("period")[["passengers","sales_amount"]]
-              .transform(lambda s: s.rolling(window=window, min_periods=1).mean())
+# 예측 매출 주입
+if not df_sel.empty:
+    df_sel = df_sel.merge(forecast_sales_all, on="date", how="left")
+    df_sel["sales_amount"] = np.where(
+        df_sel["source"].eq("forecast") & df_sel["sales_amount"].isna(),
+        df_sel["pred_sales_amount"],
+        df_sel["sales_amount"]
     )
 
+# 단위 변환
 df_sel["sales_million"] = pd.to_numeric(df_sel["sales_amount"], errors="coerce") / 1_000_000
+df_sel["passengers_k"]  = pd.to_numeric(df_sel["passengers"], errors="coerce") / 1_000  # 천명
 
-# ================= 그래프 =================
-def intersect(a1, a2, b1, b2):
-    s = max(pd.to_datetime(a1), pd.to_datetime(b1))
-    e = min(pd.to_datetime(a2), pd.to_datetime(b2))
-    return (s <= e), s, e
+# ================= X축(두 블록 카테고리) + 표시용 텍스트 =================
+order_left  = pd.date_range(l_s, l_e, freq="D") if l_s is not None else pd.DatetimeIndex([])
+order_right = pd.date_range(r_s, r_e, freq="D")
+category_array = (
+    ([f"실적|{d.strftime('%Y-%m-%d')}" for d in order_left]) +
+    [f"예측|{d.strftime('%Y-%m-%d')}" for d in order_right]
+)
+def to_xcat(row):
+    prefix = "실적" if row["period"] == "실적기간" else "예측"
+    return f"{prefix}|{row['date'].strftime('%Y-%m-%d')}"
+if not df_sel.empty:
+    df_sel["x_cat"] = df_sel.apply(to_xcat, axis=1)
 
-# 화면 범위와 예측 음영 교집합
-view_start, view_end = df_sel["date"].min(), df_sel["date"].max()
-has_fct, fct_s, fct_e = intersect(view_start, view_end, FCT_START, FCT_END)
+# =================== 그래프 패널(테두리/음영 포함) ===================
+st.markdown('<div class="panel">', unsafe_allow_html=True)
+st.subheader("예측그래프")
 
-# 마스크
-act_mask = df_sel["source"].eq("actual")
-fct_mask = df_sel["source"].eq("forecast")
+# === 표시할 항목 선택(제목과 그래프 사이) ===
+# 실적 모드에 따라 동적 표시
+if not left_df.empty:
+    # 실적+예측 모두 존재 → 4개 항목
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        show_act_sales = st.checkbox("", value=True, key="cb_act_sales")
+        st.markdown('<span class="lg-line"></span><span class="lg-text">매출액(실적, 백만원)</span>', unsafe_allow_html=True)
+    with c2:
+        show_act_pax = st.checkbox("", value=True, key="cb_act_pax")
+        st.markdown('<span class="lg-bar"></span><span class="lg-text">승객수(실적, 천명)</span>', unsafe_allow_html=True)
+    with c3:
+        show_fct_sales = st.checkbox("", value=True, key="cb_fct_sales")
+        st.markdown('<span class="lg-line" style="border-top-style:dashed;"></span><span class="lg-text">매출액(예측, 백만원)</span>', unsafe_allow_html=True)
+    with c4:
+        show_fct_pax = st.checkbox("", value=True, key="cb_fct_pax")
+        st.markdown('<span class="lg-bar" style="opacity:0.7;"></span><span class="lg-text">승객수(예측, 천명)</span>', unsafe_allow_html=True)
+else:
+    # 예측만 존재 → 2개 항목
+    c3, c4, _sp1, _sp2 = st.columns([1,1,1,1])
+    with c3:
+        show_fct_sales = st.checkbox("", value=True, key="cb_fct_sales_only")
+        st.markdown('<span class="lg-line" style="border-top-style:dashed;"></span><span class="lg-text">매출액(예측, 백만원)</span>', unsafe_allow_html=True)
+    with c4:
+        show_fct_pax = st.checkbox("", value=True, key="cb_fct_pax_only")
+        st.markdown('<span class="lg-bar" style="opacity:0.7;"></span><span class="lg-text">승객수(예측, 천명)</span>', unsafe_allow_html=True)
+    # 실적 항목은 강제로 False
+    show_act_sales = False
+    show_act_pax = False
 
-# 중앙 좌표 (배경 텍스트 위치)
-prev_mid = prev_start + (prev_end - prev_start) / 2
-curr_mid = start_date + (end_date - start_date) / 2
-
-# 스팬 라벨링
-def label_for_span(s, e):
-    has_act_span = not df_sel[(df_sel["date"].between(s, e)) & act_mask].empty
-    has_fct_span = not df_sel[(df_sel["date"].between(s, e)) & fct_mask].empty
-    if has_act_span and has_fct_span: return "혼합"
-    if has_act_span: return "실적"
-    if has_fct_span: return "예측"
-    return ""
-
-prev_label = label_for_span(prev_start, prev_end)
-curr_label = label_for_span(start_date, end_date)   # 선택기간은 보통 "예측"
-
-# === 배경: 예측 구간만 연파랑 음영, 텍스트는 규칙에 맞춰 표시 ===
-shapes, annotations = [], []
-if has_fct:
-    shapes.append(dict(
-        type="rect", xref="x", yref="paper",
-        x0=fct_s, x1=fct_e, y0=0, y1=1,
-        fillcolor="rgba(30,144,255,0.08)", line=dict(width=0), layer="below"
-    ))
-
-# 요청 규칙: '이전기간,혼합'은 '실적' 문구 / '선택기간,예측'은 '예측' 문구
-prev_text = "실적" if prev_label in ("실적", "혼합") else "예측"
-curr_text = "예측"
-
-annotations.extend([
-    dict(x=prev_mid, y=0.5, xref="x", yref="paper",
-         text=prev_text, showarrow=False,
-         font=dict(size=28, color="rgba(30,30,30,0.28)"), align="center"),
-    dict(x=curr_mid, y=0.5, xref="x", yref="paper",
-         text=curr_text, showarrow=False,
-         font=dict(size=28, color="rgba(0,91,187,0.38)"), align="center"),
-])
+# === 그래프 본체 ===
 fig = go.Figure()
-fig.update_layout(shapes=shapes, annotations=annotations)
+color_sales = "#1f77b4"  # 매출(선)
+color_pax   = "#ff7f0e"  # 승객(막대)
 
-# === 색상 ===
-color_sales = "#1f77b4"       # 매출(선, y1)
-color_pax   = "#ff7f0e"       # 승객(막대, y2)
+# 배경 음영(실적/예측 영역)
+shapes = []
+if len(order_left) > 0:
+    shapes.append(dict(type="rect", xref="x", yref="paper",
+                       x0=category_array[0], x1=category_array[len(order_left)-1],
+                       y0=0, y1=1, fillcolor="rgba(100,116,139,0.06)", line=dict(width=0), layer="below"))
+if len(order_right) > 0:
+    x0 = category_array[len(order_left)]
+    x1 = category_array[-1]
+    shapes.append(dict(type="rect", xref="x", yref="paper",
+                       x0=x0, x1=x1, y0=0, y1=1,
+                       fillcolor="rgba(30,144,255,0.08)", line=dict(width=0), layer="below"))
 
-# --- 막대 먼저 추가(실적 → 예측), 마지막에 꺾은선 추가 ---
-# 승객수(실적): 막대 (overlay 얇아짐 방지 → group 모드 사용, 폭 자동 확보)
-act_plot = df_sel[act_mask]
-if not act_plot.empty:
-    fig.add_trace(go.Bar(
-        x=act_plot["date"], y=act_plot["passengers"],
-        name="승객수(실적)",
-        marker=dict(color=color_pax, line=dict(width=0)),
-        opacity=0.55,
-        offsetgroup="actual",      # ✅ group 모드에서 서로 다른 그룹
-        yaxis="y2",
-        hovertemplate="<b>%{x|%Y-%m-%d}</b><br>승객수: %{y:,.0f} 명<extra></extra>"
+# 승객(막대)
+if not df_sel.empty and show_act_pax:
+    act_plot = df_sel[df_sel["source"].eq("actual")]
+    if not act_plot.empty:
+        fig.add_trace(go.Bar(
+            x=act_plot["x_cat"], y=act_plot["passengers_k"],
+            name="승객수(실적, 천명)",
+            marker=dict(color=color_pax, line=dict(width=0)),
+            opacity=0.55, offsetgroup="actual", yaxis="y2",
+            hovertemplate="<b>%{x}</b><br>승객수: %{y:,.1f} 천명<extra></extra>"
+        ))
+if not df_sel.empty and show_fct_pax:
+    fct_plot = df_sel[df_sel["source"].eq("forecast")]
+    if not fct_plot.empty:
+        fig.add_trace(go.Bar(
+            x=fct_plot["x_cat"], y=fct_plot["passengers_k"],
+            name="승객수(예측, 천명)",
+            marker=dict(
+                color=color_pax,
+                pattern=dict(shape="/", fgcolor="rgba(0,0,0,0.45)", solidity=0.40),
+                line=dict(width=0)
+            ),
+            opacity=0.38, offsetgroup="forecast", yaxis="y2",
+            hovertemplate="<b>%{x}</b><br>승객수(예측): %{y:,.1f} 천명<extra></extra>"
+        ))
+
+# 매출(선)
+if not df_sel.empty and show_act_sales:
+    fig.add_trace(go.Scatter(
+        x=df_sel["x_cat"], y=df_sel["sales_million"],
+        name="매출액(실적, 백만원)", mode="lines+markers",
+        line=dict(color=color_sales, width=2.6, dash="solid"),
+        marker=dict(size=6, color=color_sales),
+        yaxis="y1", connectgaps=True,
+        hovertemplate="<b>%{x}</b><br>매출액: %{y:,.1f} 백만원<extra></extra>"
+    ))
+if not df_sel.empty and show_fct_sales:
+    sales_million_forecast_only = np.where(df_sel["source"].eq("forecast"), df_sel["sales_million"], None)
+    fig.add_trace(go.Scatter(
+        x=df_sel["x_cat"], y=sales_million_forecast_only,
+        name="매출액(예측, 백만원)", mode="lines",
+        line=dict(color=color_sales, width=3.5, dash="dashdot"),
+        yaxis="y1", connectgaps=True, hoverinfo="skip"
     ))
 
-# 승객수(예측): 막대 (실적보다 더 투명)
-fct_plot = df_sel[fct_mask]
-if not fct_plot.empty:
-    fig.add_trace(go.Bar(
-        x=fct_plot["date"], y=fct_plot["passengers"],
-        name="승객수(예측)",
-        marker=dict(
-            color=color_pax,
-            pattern=dict(shape="/", fgcolor="rgba(0,0,0,0.45)", solidity=0.25),
-            line=dict(width=0)
-        ),
-        opacity=0.38,
-        offsetgroup="forecast",    # ✅ group 모드에서 서로 다른 그룹
-        yaxis="y2",
-        hovertemplate="<b>%{x|%Y-%m-%d}</b><br>승객수(예측): %{y:,.0f} 명<extra></extra>"
-    ))
+# x축 tick: '실적|' '예측|' 제거
+tickvals, ticktext = [], []
+if len(category_array) > 0:
+    step = max(1, len(category_array)//6)
+    for i in range(0, len(category_array), step):
+        tickvals.append(category_array[i])
+        ticktext.append(category_array[i].split("|")[1])
+    if category_array[-1] not in tickvals:
+        tickvals.append(category_array[-1])
+        ticktext.append(category_array[-1].split("|")[1])
 
-# === 매출액(백만원): 실선 + 예측만 점선 오버레이 (끊김 없이 이어짐)
-# 1) 전체 구간 실선 (legend: 매출액(실적))
-fig.add_trace(go.Scatter(
-    x=df_sel["date"], y=df_sel["sales_million"],
-    name="매출액(실적)",
-    mode="lines+markers",
-    line=dict(color=color_sales, width=2.6, dash="solid"),
-    marker=dict(size=6, color=color_sales),
-    yaxis="y1",
-    connectgaps=True,
-    hovertemplate="<b>%{x|%Y-%m-%d}</b><br>매출액: %{y:,.1f} 백만원<extra></extra>"
-))
+# 중간 라벨
+left_mid_idx  = len(order_left)//2 if len(order_left)>0 else None
+right_mid_idx = len(order_right)//2 if len(order_right)>0 else None
+left_mid_cat  = category_array[left_mid_idx] if left_mid_idx is not None else None
+right_mid_cat = category_array[(len(order_left) + right_mid_idx)] if right_mid_idx is not None else None
 
-# 2) 예측 구간만 점선 오버레이 (legend: 매출액(예측))
-sales_million_forecast_only = np.where(fct_mask.to_numpy(), df_sel["sales_million"], None)
-fig.add_trace(go.Scatter(
-    x=df_sel["date"], y=sales_million_forecast_only,
-    name="매출액(예측)",                  # ✅ legend 포함
-    mode="lines",
-    line=dict(color=color_sales, width=3.0, dash="dashdot"),  # ✅ 더 눈에 띄는 점선
-    yaxis="y1",
-    connectgaps=True,
-    hoverinfo="skip"
-))
-
-# === 레이아웃/축/범례 ===
 fig.update_layout(
     template="plotly_white",
     hovermode="x unified",
-    # 🔑 핵심: overlay → group 으로 변경해 막대 폭 정상화
-    barmode="group",
-    bargap=0.15,                 # 막대 간 간격(작을수록 두꺼움)
-    bargroupgap=0.05,            # 그룹 간 간격
-    xaxis=dict(title="", showgrid=True, tickformat="%Y-%m-%d", tickangle=-45),
+    barmode="group", bargap=0.15, bargroupgap=0.05,
+    shapes=shapes,
+    xaxis=dict(
+        title="",
+        type="category",
+        categoryorder="array", categoryarray=category_array,
+        tickangle=-45, tickmode="array",
+        tickvals=tickvals, ticktext=ticktext,
+        showgrid=True
+    ),
     yaxis=dict(title="매출액(백만원)", tickformat=",.1f", showgrid=True, zeroline=False),
-    yaxis2=dict(title="승객수", overlaying="y", side="right", tickformat=",.0f", showgrid=False, zeroline=False),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0, bgcolor="rgba(255,255,255,0.7)"),
-    margin=dict(t=60, r=50, b=60, l=70),
-    font=dict(family="Nanum Gothic, Malgun Gothic, AppleGothic, Noto Sans KR, Sans-Serif", size=13)
+    yaxis2=dict(title="승객수(천명)", overlaying="y", side="right", tickformat=",.1f", showgrid=False, zeroline=False),
+    showlegend=False,  # 내부 범례 숨김(외부 체크박스 사용)
+    margin=dict(t=24, r=50, b=60, l=70),
+    font=dict(family="Nanum Gothic, Malgun Gothic, AppleGothic, Noto Sans KR, Sans-Serif", size=13),
+    annotations=[
+        *([dict(x=left_mid_cat,  y=0.95, xref="x", yref="paper", text="실적", showarrow=False,
+                font=dict(size=12, color="#475569"), align="center")] if left_mid_cat else []),
+        *([dict(x=right_mid_cat, y=0.95, xref="x", yref="paper", text="예측", showarrow=False,
+                font=dict(size=12, color="#1D4ED8"), align="center")] if right_mid_cat else []),
+    ]
 )
 
 config = dict(
     displaylogo=False,
-    toImageButtonOptions=dict(format="png", filename=f"dual_axis_{start_date.date()}_{end_date.date()}", scale=2),
+    toImageButtonOptions=dict(format="png", filename=f"dual_axis_blocks_{date.today()}", scale=2),
     modeBarButtonsToAdd=["hovercompare"]
 )
 st.plotly_chart(fig, use_container_width=True, config=config)
 
-# ================= 요약표 =================
-def agg_period_sum(df: pd.DataFrame, period_label: str, col: str):
-    return pd.to_numeric(
-        df.loc[df["period"].eq(period_label), col],
-        errors="coerce"
-    ).fillna(0).sum()
+if l_s is not None:
+    st.caption(f"실적(좌): {l_s.date()} ~ {l_e.date()} · 예측(우): {r_s.date()} ~ {r_e.date()} · 길이 {N_days}일 (동일)")
+else:
+    st.caption(f"예측만 표시: {r_s.date()} ~ {r_e.date()} · 길이 {N_days}일")
+st.markdown('</div>', unsafe_allow_html=True)
 
-# df_sel에는 이미 예측 매출이 주입되어 있음 (sales_amount = 실적 + 예측값 주입)
-prev_sales_m = agg_period_sum(df_sel, "이전기간", "sales_amount") / 1_000_000
-curr_sales_m = agg_period_sum(df_sel, "선택기간", "sales_amount") / 1_000_000
-prev_pax     = agg_period_sum(df_sel, "이전기간", "passengers")
-curr_pax     = agg_period_sum(df_sel, "선택기간", "passengers")
+# =================== 요약 카드(상시 표시) ===================
+def agg_sum(df, period_label, col):
+    return pd.to_numeric(df.loc[df["period"].eq(period_label), col], errors="coerce").fillna(0).sum()
+
+left_sales_total_w  = int(agg_sum(df_sel, "실적기간", "sales_amount")) if not df_sel.empty else 0
+left_pax_total      = int(agg_sum(df_sel, "실적기간", "passengers"))  if not df_sel.empty else 0
+right_sales_total_w = int(agg_sum(df_sel, "예측기간", "sales_amount")) if not df_sel.empty else 0
+right_pax_total     = int(agg_sum(df_sel, "예측기간", "passengers"))  if not df_sel.empty else 0
 
 def pct_change(new, old):
     return np.nan if old == 0 else (new - old) / old * 100.0
+sales_pct = pct_change(right_sales_total_w, left_sales_total_w) if left_sales_total_w>0 else np.nan
+pax_pct   = pct_change(right_pax_total, left_pax_total) if left_pax_total>0 else np.nan
 
-sales_pct, pax_pct = pct_change(curr_sales_m, prev_sales_m), pct_change(curr_pax, prev_pax)
+sales_delta = ""
+pax_delta = ""
+if not np.isnan(sales_pct):
+    cls = "delta-up" if sales_pct >= 0 else "delta-down"
+    arrow = "▲" if sales_pct >= 0 else "▽"
+    sales_delta = f' <span class="{cls}">({arrow}{abs(sales_pct):.1f}%)</span>'
+if not np.isnan(pax_pct):
+    cls = "delta-up" if pax_pct >= 0 else "delta-down"
+    arrow = "▲" if pax_pct >= 0 else "▽"
+    pax_delta = f' <span class="{cls}">({arrow}{abs(pax_pct):.1f}%)</span>'
 
-summary_df = pd.DataFrame({
-    "이전기간 합계": [prev_sales_m, prev_pax],
-    "선택기간 합계": [curr_sales_m, curr_pax],
-    "증감율(%)": [sales_pct, pax_pct],
-}, index=["매출액(백만원)", "승객수(명)"])
+colA, colB = st.columns(2)
+with colA:
+    st.markdown(
+        f"""
+        <div class="card-slim">
+          <h4>🟦 실적 {f'({l_s.date()} ~ {l_e.date()})' if l_s is not None else ''}</h4>
+          <div class="metric">매출액 : 총 {left_sales_total_w/1_000_000:,.1f} 백만원</div>
+          <div class="metric">승객수 : 총 {left_pax_total/1_000:,.1f} 천명</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+with colB:
+    st.markdown(
+        f"""
+        <div class="card-slim">
+          <h4>🟧 예측 ({r_s.date()} ~ {r_e.date()})</h4>
+          <div class="metric">매출액 : 총 {right_sales_total_w/1_000_000:,.1f} 백만원{sales_delta}</div>
+          <div class="metric">승객수 : 총 {right_pax_total/1_000:,.1f} 천명{pax_delta}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-idx = pd.IndexSlice
-def style_delta(v):
-    if pd.isna(v):
-        return ""
-    return "color: green; font-weight:700;" if v >= 0 else "color: red; font-weight:700;"
+# =================== 일일 데이터(상시 표시) ===================
+st.markdown('<div class="panel">', unsafe_allow_html=True)
+st.markdown("##### 📅 일일 데이터 (블록별)")
 
-# ================= 요약표 헤더 + 체크박스 =================
-left_col, right_col = st.columns([0.85, 0.15])
-with left_col:
-    st.markdown("#### 요약표")
-with right_col:
-    show_detail = st.checkbox("자세히 보기", value=False)
+dates_left  = pd.DataFrame({"date": pd.date_range(l_s, l_e, freq="D")}) if l_s is not None else pd.DataFrame(columns=["date"])
+dates_right = pd.DataFrame({"date": pd.date_range(r_s, r_e, freq="D")})
 
-st.caption(
-    f"선택기간: {start_date.date()} ~ {end_date.date()}  ·  이전기간: {prev_start.date()} ~ {prev_end.date()}  "
-    f"(이전기간 라벨: {label_for_span(prev_start, prev_end)} / 선택기간 라벨: {label_for_span(start_date, end_date)})"
+# 실적 일일
+try:
+    act_daily_raw = load_actual_rows_df()
+    act_daily = act_daily_raw[act_daily_raw["date"].between(l_s, l_e)] if l_s is not None else pd.DataFrame(columns=act_daily_raw.columns)
+    act_daily = act_daily.copy()
+    if not act_daily.empty:
+        act_daily.rename(columns={"passengers":"act_passengers","sales_amount":"act_sales_amount"}, inplace=True)
+        act_daily["act_sales_million"] = pd.to_numeric(act_daily["act_sales_amount"], errors="coerce") / 1_000_000
+        act_daily["act_passengers_k"]  = pd.to_numeric(act_daily["act_passengers"], errors="coerce") / 1_000
+        act_daily = act_daily[["date","act_passengers_k","act_sales_million"]]
+except (FileNotFoundError, KeyError):
+    act_daily = pd.DataFrame(columns=["date","act_passengers_k","act_sales_million"])
+
+# 예측 일일
+f_pass = (
+    forecast_df_all[forecast_df_all["date"].between(r_s, r_e)]
+    .loc[:, ["date", "passengers"]]
+    .rename(columns={"passengers":"pred_passengers"})
 )
+try:
+    f_sales_raw = load_forecast_sales_df()
+    f_sales = f_sales_raw[f_sales_raw["date"].between(r_s, r_e)].copy()
+    f_sales["pred_sales_million"] = pd.to_numeric(f_sales["pred_sales_amount"], errors="coerce") / 1_000_000
+    f_sales = f_sales[["date","pred_sales_million"]]
+except FileNotFoundError:
+    f_sales = pd.DataFrame(columns=["date","pred_sales_million"])
 
-# ================= 요약표 본표 =================
-styler = (
-    summary_df.style
-        .format(na_rep="-")
-        .format("{:,.1f}", subset=idx["매출액(백만원)", ["이전기간 합계", "선택기간 합계"]])
-        .format("{:,.0f}", subset=idx["승객수(명)", ["이전기간 합계", "선택기간 합계"]])
-        .format("{:,.1f}%", subset=idx[:, ["증감율(%)"]])
-        .applymap(style_delta, subset=idx[:, ["증감율(%)"]])
+left_table = (
+    dates_left.merge(act_daily, on="date", how="left")
+              .assign(구분="실적", 날짜=lambda d: d["date"].dt.strftime("%Y-%m-%d"))
+              .rename(columns={"act_passengers_k":"승객수(천명)","act_sales_million":"매출액(백만원)"})
+              [["구분","날짜","승객수(천명)","매출액(백만원)"]]
+    if not dates_left.empty else pd.DataFrame(columns=["구분","날짜","승객수(천명)","매출액(백만원)"])
 )
-st.dataframe(styler, use_container_width=True)
+right_table = (
+    dates_right.merge(f_pass, on="date", how="left").merge(f_sales, on="date", how="left")
+               .assign(구분="예측", 날짜=lambda d: d["date"].dt.strftime("%Y-%m-%d"),
+                       승객천명=lambda d: pd.to_numeric(d["pred_passengers"], errors="coerce")/1_000)
+               .rename(columns={"승객천명":"승객수(천명)","pred_sales_million":"매출액(백만원)"})
+               [["구분","날짜","승객수(천명)","매출액(백만원)"]]
+)
+detail_df = pd.concat([left_table, right_table], ignore_index=True)
 
-# ================= 자세히 보기: 일일데이터(실적/예측 + 오차율) =================
-if show_detail:
-    # 선택기간 달력(모든 일자)
-    dates_df = pd.DataFrame({"date": pd.date_range(start_date, end_date, freq="D")})
-    if dates_df.empty:
-        st.info("선택기간 데이터가 없습니다.")
-    else:
-        # 1) 예측 승객수: forecast_pass.csv
-        f_pass = (
-            forecast_df_all[forecast_df_all["date"].between(start_date, end_date)]
-            .loc[:, ["date", "passengers"]]
-            .rename(columns={"passengers": "pred_passengers"})
-        )
-
-        # 2) 예측 매출액: forecast_sales.csv / .cvs
-        try:
-            f_sales_raw = load_forecast_sales_df()
-            f_sales = (
-                f_sales_raw[f_sales_raw["date"].between(start_date, end_date)]
-                .copy()
-            )
-            f_sales["pred_sales_million"] = (
-                pd.to_numeric(f_sales["pred_sales_amount"], errors="coerce") / 1_000_000
-            )
-            f_sales = f_sales[["date", "pred_sales_million"]]
-        except FileNotFoundError as e:
-            st.error(f"{e}")
-            f_sales = pd.DataFrame(columns=["date", "pred_sales_million"])
-
-        # 3) 실적(승객/매출): train_reservations_rows.csv
-        try:
-            act_daily_raw = load_actual_rows_df()
-            act_daily = act_daily_raw[
-                act_daily_raw["date"].between(start_date, end_date)
-            ].copy()
-            act_daily.rename(
-                columns={
-                    "passengers": "act_passengers",
-                    "sales_amount": "act_sales_amount",
-                },
-                inplace=True,
-            )
-            act_daily["act_sales_million"] = (
-                pd.to_numeric(act_daily["act_sales_amount"], errors="coerce") / 1_000_000
-            )
-            act_daily = act_daily[["date", "act_passengers", "act_sales_million"]]
-        except (FileNotFoundError, KeyError) as e:
-            st.error(f"실적 로딩 오류: {e}")
-            act_daily = pd.DataFrame(columns=["date", "act_passengers", "act_sales_million"])
-
-        # 4) 병합 (달력 기준 좌측 조인)
-        daily_merged = (
-            dates_df.merge(act_daily, on="date", how="left")
-                    .merge(f_pass, on="date", how="left")
-                    .merge(f_sales, on="date", how="left")
-                    .sort_values("date")
-        )
-
-        # 5) 오차율 계산 (실적이 0/결측이면 NaN)
-        daily_merged["승객수 오차율(%)"] = (
-            (daily_merged["pred_passengers"] - daily_merged["act_passengers"])
-            / daily_merged["act_passengers"] * 100.0
-        ).where(daily_merged["act_passengers"].fillna(0).ne(0))
-
-        daily_merged["매출액 오차율(%)"] = (
-            (daily_merged["pred_sales_million"] - daily_merged["act_sales_million"])
-            / daily_merged["act_sales_million"] * 100.0
-        ).where(daily_merged["act_sales_million"].fillna(0).ne(0))
-
-        # 6) 표 생성
-        detail_df = pd.DataFrame({
-            "날짜": daily_merged["date"].dt.strftime("%Y-%m-%d"),
-            "실적 승객수(명)": daily_merged["act_passengers"],
-            "실적 매출액(백만원)": daily_merged["act_sales_million"],
-            "예측 승객수(명)": daily_merged["pred_passengers"],
-            "예측 매출액(백만원)": daily_merged["pred_sales_million"],
-            "승객수 오차율(%)": daily_merged["승객수 오차율(%)"],
-            "매출액 오차율(%)": daily_merged["매출액 오차율(%)"],
-        })
-
-        # ===== 강조 스타일 함수 정의 =====
-        def highlight_error(v):
-            if pd.isna(v):
-                return ""
-            if abs(v) <= 10:   # ±10% 이내는 파란색
-                return "color: blue; font-weight: 700;"
-            elif abs(v) >= 20: # ±20% 이상은 빨간색
-                return "color: red; font-weight: 700;"
-            else:
-                return ""
-
-        # ===== 스타일 적용 =====
-        st.markdown("##### 📅 선택기간 일일 데이터 (실적 vs 예측 + 오차율)")
-        st.dataframe(
-            detail_df.style
-                .format({
-                    "실적 승객수(명)": "{:,.0f}",
-                    "예측 승객수(명)": "{:,.0f}",
-                    "실적 매출액(백만원)": "{:,.1f}",
-                    "예측 매출액(백만원)": "{:,.1f}",
-                    "승객수 오차율(%)": "{:,.1f}%",
-                    "매출액 오차율(%)": "{:,.1f}%"
-                })
-                .applymap(highlight_error, subset=["승객수 오차율(%)", "매출액 오차율(%)"]),  # ✅ 오차율 강조 적용
-            use_container_width=True,
-            height=360
-        )
+st.dataframe(
+    detail_df.style.format({"승객수(천명)": "{:,.1f}", "매출액(백만원)": "{:,.1f}"}),
+    use_container_width=True,
+    height=360
+)
+st.markdown('</div>', unsafe_allow_html=True)
