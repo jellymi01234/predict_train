@@ -1,5 +1,3 @@
-#1차 초안
-
 # app.py ── Streamlit (https://<YOUR-APP>.streamlit.app)
 import io
 from pathlib import Path
