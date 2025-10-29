@@ -9,7 +9,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import re
 
-# ✅ Ag-Grid (합계행 상단 고정 & 컬럼 필터/정렬/선택 지원)
+# ✅ Ag-Grid (합계행 상단 고정 & 컬럼 필터/정렬/선택 지원) ── (사용 안 해도 됨: 데이터 매트릭스는 st.data_editor 사용)
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 except Exception as _e:
@@ -479,7 +479,6 @@ if not left_tbl.empty:
     actual_df_show = pd.DataFrame({k:v for k,v in d.items()
                                    if not (isinstance(v, pd.Series) and v.isna().all())})
 
-
 fcast_dict = {
     "예측|일자": fmt_date_ko(right_tbl["date"]),
 }
@@ -533,11 +532,9 @@ if "예측|휴무여부" in table_df.columns: sum_row["예측|휴무여부"] = "
 if "예측|휴일명(풀)" in table_df.columns: sum_row["예측|휴일명(풀)"] = ""
 
 # ======== 매트릭스 렌더링 (실적/예측 분리) ========
-# ======== 매트릭스(생성 → 전치) : 행=일자, 열=지표 ========
-# ======== 매트릭스(생성 → 전치) : 행=일자, 열=지표 ========
 st.markdown("#### 📋 데이터 매트릭스 (행=일자, 열=지표)")
 
-# ---- 실적 매트릭스 생성 ----
+# ---- 실적/예측 매트릭스 생성 함수 (동일)
 def _build_left_matrix() -> pd.DataFrame:
     if left_tbl.empty:
         return pd.DataFrame()
@@ -546,10 +543,7 @@ def _build_left_matrix() -> pd.DataFrame:
         rows["매출액(백만원)|실적"] = left_tbl["sales_million"].round(0).astype("Int64").tolist()
     if st.session_state.get("cb_pax", True) and "passengers_k" in left_tbl:
         rows["승객수(천명)|실적"] = left_tbl["passengers_k"].round(0).astype("Int64").tolist()
-
     df = pd.DataFrame.from_dict(rows, orient="index", columns=fmt_date_ko(left_tbl["date"]))
-
-    # 합계(숫자 행만)
     sums = []
     for idx in df.index:
         s = pd.to_numeric(df.loc[idx], errors="coerce").sum(min_count=1)
@@ -557,15 +551,12 @@ def _build_left_matrix() -> pd.DataFrame:
     df.insert(0, "합계", sums)
     return df
 
-# ---- 예측 매트릭스 생성 ----
 def _build_right_matrix() -> pd.DataFrame:
     if right_tbl.empty:
         return pd.DataFrame()
-
     def _delta_str(pct):
         if pd.isna(pct): return ""
         return f" ({'▲' if pct>=0 else '▼'}{abs(pct):.1f}%)"
-
     rows = {}
     if st.session_state.get("cb_sales", True) and "sales_million" in right_tbl:
         vals = right_tbl["sales_million"]
@@ -582,7 +573,6 @@ def _build_right_matrix() -> pd.DataFrame:
             for v, p in zip(vals, pcts)
         ]
     df = pd.DataFrame.from_dict(rows, orient="index", columns=fmt_date_ko(right_tbl["date"]))
-    # 합계
     sum_col = []
     for idx in df.index:
         if idx.startswith("매출액"):
@@ -599,7 +589,6 @@ def _build_right_matrix() -> pd.DataFrame:
 left_matrix  = _build_left_matrix()
 right_matrix = _build_right_matrix()
 
-# ---- 전치 ----
 def _transpose_with_sum_first(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return pd.DataFrame()
     t = df.T
@@ -610,17 +599,25 @@ def _transpose_with_sum_first(df: pd.DataFrame) -> pd.DataFrame:
 left_T  = _transpose_with_sum_first(left_matrix)
 right_T = _transpose_with_sum_first(right_matrix)
 
-# ==== [실적기간(전치)] 컬럼 순서: '휴일' → '외부요인' 로 맨 끝에 정렬 + 숫자 3자리 콤마 ====
-if not left_T.empty:
-    # 1) 맨 오른쪽에 '휴일' 그다음 '외부요인' 순서로 재배치
-    if "휴일" in left_T.columns:
-        _col = left_T.pop("휴일")
-        left_T["휴일"] = _col
-    if "외부요인" in left_T.columns:
-        _col = left_T.pop("외부요인")
-        left_T["외부요인"] = _col
+# ==== 전치표: 외부요인/휴일 컬럼 추가 및 포맷 ====
+if not left_T.empty and not left_tbl.empty:
+    ext_values = build_event_strings(pd.DatetimeIndex(left_tbl["date"]), external_factors_df)
+    left_holiday_labels2, _ = build_holiday_labels(pd.DatetimeIndex(left_tbl["date"]), holidays_df, max_len=6)
 
-    # 2) 매출액/승객수는 3자리 콤마로 포맷 (합계 행 포함)
+    def _append_aligned_column(T: pd.DataFrame, dates: pd.Series, values: list, col_name: str):
+        if T is None or T.empty: return T
+        date_labels = list(fmt_date_ko(pd.Series(dates)))
+        mapping = {lbl: val for lbl, val in zip(date_labels, values)}
+        aligned = []
+        for idx in T.index:
+            aligned.append("" if str(idx) == "합계" else mapping.get(idx, ""))
+        T[col_name] = aligned
+        return T
+
+    left_T = _append_aligned_column(left_T, left_tbl["date"], ext_values, "외부요인")
+    left_T = _append_aligned_column(left_T, left_tbl["date"], left_holiday_labels2, "휴일")
+
+    # 숫자 포맷(3자리 콤마)
     def _fmt_commas(v):
         if v is None or (isinstance(v, float) and pd.isna(v)) or (isinstance(v, str) and v.strip() == ""):
             return ""
@@ -631,37 +628,14 @@ if not left_T.empty:
             return f"{int(round(n)):,}"
         except Exception:
             return str(v)
-
     num_cols = [c for c in left_T.columns if ("매출액" in c) or ("승객수" in c)]
     for c in num_cols:
         left_T[c] = left_T[c].apply(_fmt_commas)
 
-
-
-# ==== 실적기간(전치) 표에 '외부요인'과 '휴일' 컬럼 추가 ====
-if not left_T.empty and not left_tbl.empty:
-    # 외부요인 문자열 ("이벤트 N")
-    ext_values = build_event_strings(pd.DatetimeIndex(left_tbl["date"]), external_factors_df)
-    # 휴일 라벨 (6자 이내)
-    left_holiday_labels, _ = build_holiday_labels(pd.DatetimeIndex(left_tbl["date"]), holidays_df, max_len=6)
-
-    # 전치 테이블 인덱스와 맞춰서 컬럼 길이 정렬
-    def _append_aligned_column(T: pd.DataFrame, dates: pd.Series, values: list, col_name: str):
-        date_labels = list(fmt_date_ko(pd.Series(dates)))
-        mapping = {lbl: val for lbl, val in zip(date_labels, values)}
-        aligned = []
-        for idx in T.index:
-            aligned.append("" if str(idx) == "합계" else mapping.get(idx, ""))
-        T[col_name] = aligned
-        return T
-
-    left_T = _append_aligned_column(left_T, left_tbl["date"], ext_values, "외부요인")
-    left_T = _append_aligned_column(left_T, left_tbl["date"], left_holiday_labels, "휴일")
-
-# ==== 예측기간(전치) 표: 맨 오른쪽에 '휴일'만 추가 ====
+# ==== 예측기간(전치): 휴일 컬럼만 맨 끝에 ====
 if not right_T.empty and not right_tbl.empty:
-    # 도우미: 전치 테이블 인덱스(합계 포함)에 맞춰 안전하게 컬럼 추가
     def _append_aligned_column(T: pd.DataFrame, dates: pd.Series, values: list, col_name: str):
+        if T is None or T.empty: return T
         date_labels = list(fmt_date_ko(pd.Series(dates)))
         mapping = {lbl: val for lbl, val in zip(date_labels, values)}
         aligned = []
@@ -669,139 +643,273 @@ if not right_T.empty and not right_tbl.empty:
             aligned.append("" if str(idx) == "합계" else mapping.get(idx, ""))
         T[col_name] = aligned
         return T
-
-    # 1) 혹시 이전 코드로 '휴무'가 있었다면 제거
     if "휴무" in right_T.columns:
         right_T = right_T.drop(columns=["휴무"])
-
-    # 2) 휴일 라벨 생성
-    right_holiday_labels, _ = build_holiday_labels(pd.DatetimeIndex(right_tbl["date"]), holidays_df, max_len=6)
-
-    # 3) 이미 '휴일'이 있으면 맨 뒤로 이동(pop→재할당), 없으면 새로 추가
+    right_holiday_labels2, _ = build_holiday_labels(pd.DatetimeIndex(right_tbl["date"]), holidays_df, max_len=6)
     if "휴일" in right_T.columns:
         _col = right_T.pop("휴일")
         right_T["휴일"] = _col
     else:
-        right_T = _append_aligned_column(right_T, right_tbl["date"], right_holiday_labels, "휴일")
+        right_T = _append_aligned_column(right_T, right_tbl["date"], right_holiday_labels2, "휴일")
 
-
-
-# ---- (도우미) 전치 테이블의 인덱스에 맞춰 안전하게 컬럼 추가 ----
-def _append_aligned_column(T: pd.DataFrame, dates: pd.Series, values: list, col_name: str):
-    """
-    T: 전치된 테이블 (index = ["합계", fmt_date_ko(...), ...])
-    dates: 원본 날짜 Series (예: left_tbl["date"] or right_tbl["date"])
-    values: 날짜 개수만큼의 값 리스트 (예: 외부요인/휴일 라벨들)
-    col_name: 추가할 컬럼명
-    """
-    if T is None or T.empty:
-        return T
-    # 전치 테이블의 인덱스(일자 라벨)에 맞춰 매핑
-    date_labels = list(fmt_date_ko(pd.Series(dates)))
-    mapping = {lbl: val for lbl, val in zip(date_labels, values)}
-
-    aligned = []
-    for idx in T.index:
-        if str(idx) == "합계":
-            aligned.append("")  # 합계 행에는 빈값
-        else:
-            aligned.append(mapping.get(idx, ""))  # 해당 일자 없으면 빈값
-
-# ---- 스타일 ----
-def _style_weekend_rows(df: pd.DataFrame) -> pd.io.formats.style.Styler:
-    blue_text = "#1e90ff"; red_text = "#ef4444"
-    sty = df.style.set_properties(**{"text-align":"center"}) \
-                  .set_table_styles([{"selector":"th","props":"text-align:center;"}])
-    if "합계" in df.index:
-        sty = sty.set_properties(subset=(["합계"], df.columns),
-                                 **{"font-weight":"bold","background-color": SUM_BG})
-    for idx in df.index:
-        if isinstance(idx, str) and "(토)" in idx:
-            sty = sty.set_properties(subset=([idx], df.columns), **{"color": blue_text})
-        if isinstance(idx, str) and "(일)" in idx:
-            sty = sty.set_properties(subset=([idx], df.columns), **{"color": red_text})
-    return sty
-
-# ---- 출력 ----
-c1, c2 = st.columns(2)
-with c1:
-    st.markdown("**실적 기간 (전치)**")
-    if left_T.empty:
-        st.info("실적 기간 데이터가 없습니다.")
-    else:
-        # 1) 인덱스('일자')를 컬럼으로 꺼내기
-        left_T.index.name = "일자"
-        left_edit = left_T.reset_index()
-
-        # 2) '외부요인' 오른쪽에 체크박스 컬럼 추가 (없으면 맨 끝에 추가)
-        insert_pos = left_edit.columns.get_loc("외부요인") + 1 if "외부요인" in left_edit.columns else len(left_edit.columns)
-        if "선택" not in left_edit.columns:
-            left_edit.insert(insert_pos, "선택", False)
-
-        # 3) 합계 행은 체크해도 무시하도록 표시(시각적으로는 체크 가능하지만 처리에서 제외)
-        #    ※ st.data_editor는 행 단위 비활성화가 없어, 후처리에서 제외합니다.
-        #    필요하면 '합계' 행에 안내 텍스트를 덧붙여도 됩니다.
-
-        # 4) 에디터 렌더 (체크박스 포함)
-        edited_left = st.data_editor(
-            left_edit,
-            hide_index=True,
-            use_container_width=True,
-            height=min(520, 140 + 28 * max(3, len(left_edit))),
-            column_config={
-                "선택": st.column_config.CheckboxColumn(
-                    "선택",
-                    help="해당 일자의 이벤트를 선택합니다.",
-                    default=False,
-                ),
-            },
-            disabled=["일자"],  # 날짜는 수정 못 하도록
-        )
-
-        # 5) 선택 결과를 세션에 저장 (합계 행 제외)
-        selected_mask = (edited_left.get("선택") == True) & (edited_left.get("일자") != "합계")
-        st.session_state["selected_event_dates_from_matrix"] = edited_left.loc[selected_mask, "일자"].tolist()
-
-
-
-
-
-        # 6) 선택 요약 표시 (원하면 이 값을 통합 상세 섹션과 연동 가능)
-        if st.session_state["selected_event_dates_from_matrix"]:
-            st.caption("✅ 선택된 일자: " + ", ".join(st.session_state["selected_event_dates_from_matrix"]))
-        else:
-            st.caption("선택된 일자가 없습니다.")
-
-# ==== 체크된 날짜의 이벤트 세로 나열 ====
-def _label_to_date(lbl: str) -> pd.Timestamp | None:
-    # "YYYY-MM-DD (요일)" 형식에서 앞 10자리만 파싱
+# ==== (중요) 최초 진입/기간 변경 시 이벤트 맵 선생성 ====
+@st.cache_data(show_spinner=False)
+def load_concert_counts_df() -> pd.DataFrame:
     try:
-        s = str(lbl).strip()
-        iso = s[:10]  # "YYYY-MM-DD"
-        dt = pd.to_datetime(iso, errors="coerce")
-        return None if pd.isna(dt) else dt.normalize()
-    except Exception:
-        return None
+        df = load_df_from_repo_csv("merged.csv").copy()
+    except FileNotFoundError:
+        st.warning("'merged.csv'를 찾지 못해 콘서트 카운트를 표시할 수 없습니다.")
+        return pd.DataFrame(columns=["date","concerts_events_count"])
+    cols = {c.lower(): c for c in df.columns}
+    need = ["date","concerts_events_count"]
+    for k in need:
+        if k not in [c.lower() for c in df.columns]:
+            st.warning(f"'merged.csv'에 '{k}' 컬럼이 없습니다.")
+            return pd.DataFrame(columns=["date","concerts_events_count"])
+    df.rename(columns={cols.get("date","date"):"date",
+                       cols.get("concerts_events_count","concerts_events_count"):"concerts_events_count"}, inplace=True)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["concerts_events_count"] = pd.to_numeric(df["concerts_events_count"], errors="coerce").fillna(0).astype(int)
+    df = df.dropna(subset=["date"]).sort_values("date")
+    df = df[(df["date"] >= ACT_START) & (df["date"] <= ACT_END)]
+    return df[["date","concerts_events_count"]]
 
-# 1) 선택된 '일자' 라벨 → 날짜로 변환
-_selected_labels = st.session_state.get("selected_event_dates_from_matrix", []) or []
-_selected_dates = [d for d in (_label_to_date(x) for x in _selected_labels) if d is not None]
-_selected_dates = sorted(set(_selected_dates))
+@st.cache_data(show_spinner=False)
+def load_concert_info_df() -> pd.DataFrame:
+    try:
+        df = load_df_from_repo_csv("concert_info_rows.csv").copy()
+    except FileNotFoundError:
+        st.warning("'concert_info_rows.csv' 파일을 찾을 수 없습니다. 콘서트 상세를 건너뜁니다.")
+        return pd.DataFrame(columns=["title","start_date","end_date","label"])
+    required = ["title","s_y","s_m","s_d","e_y","e_m","e_d"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.warning(f"'concert_info_rows.csv'에 다음 컬럼이 필요합니다: {', '.join(missing)}")
+        return pd.DataFrame(columns=["title","start_date","end_date","label"])
 
-# 2) 통합 이벤트 맵 확보 (세션에 없으면 즉석 생성)
-integrated_map = st.session_state.get("integrated_event_map", None)
+    def _to_int(s):
+        return pd.to_numeric(pd.Series(s, dtype=str).str.replace(r"[^\d]", "", regex=True), errors="coerce").astype("Int64")
+
+    for c in ["s_y","s_m","s_d","e_y","e_m","e_d"]:
+        df[c] = _to_int(df[c])
+
+    s_str = (df["s_y"].astype(str).str.zfill(4) + "-" +
+             df["s_m"].astype(str).str.zfill(2) + "-" +
+             df["s_d"].astype(str).str.zfill(2))
+    e_str = (df["e_y"].astype(str).str.zfill(4) + "-" +
+             df["e_m"].astype(str).str.zfill(2) + "-" +
+             df["e_d"].astype(str).str.zfill(2))
+
+    df["start_date"] = pd.to_datetime(s_str, errors="coerce")
+    df["end_date"]   = pd.to_datetime(e_str, errors="coerce")
+    df = df.dropna(subset=["start_date","end_date"])
+    df = df[df["start_date"] <= df["end_date"]].copy()
+    df["label"] = "(Concert)" + df["title"].astype(str) + " (" + df["start_date"].dt.strftime("%Y-%m-%d") + "~" + df["end_date"].dt.strftime("%Y-%m-%d") + ")"
+    return df[["title","start_date","end_date","label"]]
+
+def build_concert_map_by_date(visible_dates: pd.DatetimeIndex,
+                              counts_df: pd.DataFrame,
+                              info_df: pd.DataFrame) -> dict:
+    if visible_dates is None or len(visible_dates) == 0 or counts_df is None or counts_df.empty or info_df is None or info_df.empty:
+        return {}
+    counts = counts_df.set_index("date").reindex(visible_dates).fillna(0)
+    target_days = [d.normalize() for d in visible_dates if counts.loc[d, "concerts_events_count"] > 0]
+    if not target_days:
+        return {}
+    target_set = set(target_days)
+    bucket = {d: [] for d in target_days}
+    min_d, max_d = min(target_set), max(target_set)
+    for _, row in load_concert_info_df().iterrows() if info_df is None else info_df.iterrows():
+        s, e, label = row["start_date"].normalize(), row["end_date"].normalize(), str(row["label"])
+        if pd.isna(s) or pd.isna(e) or label.strip() == "": continue
+        if e < min_d or s > max_d: continue
+        start = max(s, min_d); end = min(e, max_d)
+        for d in pd.date_range(start, end, freq="D"):
+            d0 = d.normalize()
+            if d0 in target_set:
+                bucket[d0].append(label)
+    bucket = {d: [t for t in titles if t.strip() != ""] for d, titles in bucket.items()}
+    return {d: titles for d, titles in bucket.items() if titles}
+
+@st.cache_data(show_spinner=False)
+def load_expo_counts_df() -> pd.DataFrame:
+    try:
+        df = load_df_from_repo_csv("merged.csv").copy()
+    except FileNotFoundError:
+        st.warning("'merged.csv'를 찾지 못해 박람회 카운트를 표시할 수 없습니다.")
+        return pd.DataFrame(columns=["date","coex_events_count","kintex_events_count","bexco_events_count"])
+    cols = {c.lower(): c for c in df.columns}
+    need = ["date","coex_events_count","kintex_events_count","bexco_events_count"]
+    for k in need:
+        if k not in [c.lower() for c in df.columns]:
+            st.warning(f"'merged.csv'에 '{k}' 컬럼이 없습니다.")
+            return pd.DataFrame(columns=["date","coex_events_count","kintex_events_count","bexco_events_count"])
+    df.rename(columns={
+        cols.get("date","date"): "date",
+        cols.get("coex_events_count","coex_events_count"): "coex_events_count",
+        cols.get("kintex_events_count","kintex_events_count"): "kintex_events_count",
+        cols.get("bexco_events_count","bexco_events_count"): "bexco_events_count",
+    }, inplace=True)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for c in ["coex_events_count","kintex_events_count","bexco_events_count"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+    df = df.dropna(subset=["date"]).sort_values("date")
+    df = df[(df["date"] >= ACT_START) & (df["date"] <= ACT_END)]
+    return df[["date","coex_events_count","kintex_events_count","bexco_events_count"]]
+
+@st.cache_data(show_spinner=False)
+def load_expo_info_df(file_name: str, venue_prefix: str) -> pd.DataFrame:
+    try:
+        df = load_df_from_repo_csv(file_name).copy()
+    except FileNotFoundError:
+        st.warning(f"'{file_name}' 파일을 찾을 수 없습니다. ({venue_prefix} 상세 건너뜀)")
+        return pd.DataFrame(columns=["event_name","start_date","end_date","label"])
+    if "event_name" not in df.columns:
+        st.warning(f"'{file_name}'에 'event_name' 컬럼이 없습니다.")
+        df["event_name"] = ""
+    start_col = "start_date" if "start_date" in df.columns else ("strart_date" if "strart_date" in df.columns else None)
+    end_col   = "end_date" if "end_date" in df.columns else None
+    if start_col is None or end_col is None:
+        st.warning(f"'{file_name}'에 시작/종료일 컬럼(start_date/strart_date, end_date)이 없습니다.")
+        return pd.DataFrame(columns=["event_name","start_date","end_date","label"])
+    df["start_date"] = pd.to_datetime(df[start_col], errors="coerce")
+    df["end_date"]   = pd.to_datetime(df[end_col],   errors="coerce")
+    df = df.dropna(subset=["start_date","end_date"])
+    df = df[df["start_date"] <= df["end_date"]].copy()
+    df["event_name"] = df["event_name"].astype(str)
+    df["label"] = "(" + venue_prefix + ")" + df["event_name"] + " (" + \
+                  df["start_date"].dt.strftime("%Y-%m-%d") + "~" + df["end_date"].dt.strftime("%Y-%m-%d") + ")"
+    return df[["event_name","start_date","end_date","label"]]
+
+def build_event_titles_by_date(visible_dates: pd.DatetimeIndex,
+                               counts_df: pd.DataFrame,
+                               info_df: pd.DataFrame,
+                               count_col: str) -> dict:
+    if visible_dates is None or len(visible_dates) == 0:
+        return {}
+    if counts_df is None or counts_df.empty or info_df is None or info_df.empty:
+        return {}
+    counts = counts_df.set_index("date").reindex(visible_dates).fillna(0)
+    target_days = [d.normalize() for d in visible_dates if (count_col in counts.columns and counts.loc[d, count_col] > 0)]
+    if not target_days:
+        return {}
+    target_set = set(target_days)
+    bucket = {d: [] for d in target_days}
+    min_d, max_d = min(target_set), max(target_set)
+    for _, row in info_df.iterrows():
+        s, e, label = pd.to_datetime(row["start_date"]).normalize(), pd.to_datetime(row["end_date"]).normalize(), str(row["label"])
+        if pd.isna(s) or pd.isna(e) or label.strip() == "":
+            continue
+        if e < min_d or s > max_d:
+            continue
+        start = max(s, min_d); end = min(e, max_d)
+        if start > end:
+            continue
+        for d in pd.date_range(start, end, freq="D"):
+            d0 = d.normalize()
+            if d0 in target_set:
+                bucket[d0].append(label)
+    bucket = {d: [t for t in titles if t.strip() != ""] for d, titles in bucket.items()}
+    bucket = {d: titles for d, titles in bucket.items() if titles}
+    return bucket
+
+@st.cache_data(show_spinner=False)
+def load_sports_counts_df() -> pd.DataFrame:
+    try:
+        df = load_df_from_repo_csv("merged.csv").copy()
+    except FileNotFoundError:
+        st.warning("'merged.csv'를 찾지 못해 스포츠 카운트를 표시할 수 없습니다.")
+        return pd.DataFrame(columns=["date","games_baseball","games_soccer"])
+    cols = {c.lower(): c for c in df.columns}
+    need = ["date","games_baseball","games_soccer"]
+    for k in need:
+        if k not in [c.lower() for c in df.columns]:
+            st.warning(f"'merged.csv'에 '{k}' 컬럼이 없습니다.")
+            return pd.DataFrame(columns=["date","games_baseball","games_soccer"])
+    df.rename(columns={
+        cols.get("date","date"): "date",
+        cols.get("games_baseball","games_baseball"): "games_baseball",
+        cols.get("games_soccer","games_soccer"): "games_soccer",
+    }, inplace=True)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for c in ["games_baseball","games_soccer"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+    df = df.dropna(subset=["date"]).sort_values("date")
+    df = df[(df["date"] >= ACT_START) & (df["date"] <= ACT_END)]
+    return df[["date","games_baseball","games_soccer"]]
+
+@st.cache_data(show_spinner=False)
+def load_baseball_schedule_df() -> pd.DataFrame:
+    try:
+        df = load_df_from_repo_csv("baseball_schedule_rows.csv").copy()
+    except FileNotFoundError:
+        st.warning("'baseball_schedule_rows.csv' 파일을 찾을 수 없습니다. (야구 일정 생략)")
+        return pd.DataFrame(columns=["date","label"])
+    required = ["game_date","home_team","away_team","region"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.warning(f"야구 일정에 필요한 컬럼이 없습니다: {', '.join(missing)}")
+        return pd.DataFrame(columns=["date","label"])
+    df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce").dt.normalize()
+    df = df.dropna(subset=["game_date"]).copy()
+    if "note" in df.columns:
+        mask_keep = df["note"].isna() | (df["note"].astype(str).str.strip() == "")
+        df = df[mask_keep].copy()
+    for c in ["home_team","away_team","region"]:
+        df[c] = df[c].astype(str).fillna("")
+    df["label"] = "(Baseball)" + df["home_team"] + " VS " + df["away_team"] + " in " + df["region"]
+    df.rename(columns={"game_date":"date"}, inplace=True)
+    return df[["date","label"]]
+
+@st.cache_data(show_spinner=False)
+def load_kleague_schedule_df() -> pd.DataFrame:
+    try:
+        df = load_df_from_repo_csv("k_league_rows.csv").copy()
+    except FileNotFoundError:
+        st.warning("'k_league_rows.csv' 파일을 찾을 수 없습니다. (K리그 일정 생략)")
+        return pd.DataFrame(columns=["date","label"])
+    for c in ["date","class","stadium"]:
+        if c not in df.columns:
+            df[c] = ""
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
+    df = df.dropna(subset=["date"]).copy()
+    df["class"]   = df["class"].astype(str)
+    df["stadium"] = df["stadium"].astype(str)
+    df["label"] = "(K-league)" + df["class"] + " in " + df["stadium"]
+    return df[["date","label"]]
+
+def build_single_day_titles_by_date(visible_dates: pd.DatetimeIndex,
+                                    counts_df: pd.DataFrame,
+                                    info_df: pd.DataFrame,
+                                    count_col: str,
+                                    info_date_col: str = "date") -> dict:
+    if visible_dates is None or len(visible_dates) == 0:
+        return {}
+    if counts_df is None or counts_df.empty or info_df is None or info_df.empty:
+        return {}
+    counts = counts_df.set_index("date").reindex(visible_dates).fillna(0)
+    target_days = [d.normalize() for d in visible_dates if (count_col in counts.columns and counts.loc[d, count_col] > 0)]
+    if not target_days:
+        return {}
+    info_df = info_df.copy()
+    info_df[info_date_col] = pd.to_datetime(info_df[info_date_col]).dt.normalize()
+    by_date = (info_df.groupby(info_date_col)["label"]
+                     .apply(lambda s: [str(x) for x in s if isinstance(x, str) and x.strip() != ""])
+                     .to_dict())
+    bucket = {}
+    for d in target_days:
+        labels = by_date.get(d, [])
+        if labels:
+            bucket[d] = labels
+    return bucket
 
 def _build_integrated_map_for_range(s: pd.Timestamp, e: pd.Timestamp) -> dict:
     if s is None or e is None or s > e:
         return {}
     visible_left = pd.date_range(s, e, freq="D")
-
-    # 콘서트
     concert_counts_df = load_concert_counts_df()
     concert_info_df   = load_concert_info_df()
     concert_map = build_concert_map_by_date(visible_left, concert_counts_df, concert_info_df)
-
-    # 박람회
     expo_counts_df = load_expo_counts_df()
     coex_info_df   = load_expo_info_df("coex_events_rows.csv",   "Coex")
     kintex_info_df = load_expo_info_df("kintex_events_rows.csv", "Kintex")
@@ -809,15 +917,11 @@ def _build_integrated_map_for_range(s: pd.Timestamp, e: pd.Timestamp) -> dict:
     coex_map   = build_event_titles_by_date(visible_left, expo_counts_df, coex_info_df,   "coex_events_count")
     kintex_map = build_event_titles_by_date(visible_left, expo_counts_df, kintex_info_df, "kintex_events_count")
     bexco_map  = build_event_titles_by_date(visible_left, expo_counts_df, bexco_info_df,  "bexco_events_count")
-
-    # 스포츠
     sports_counts_df = load_sports_counts_df()
     baseball_df = load_baseball_schedule_df()
     kleague_df  = load_kleague_schedule_df()
     baseball_map = build_single_day_titles_by_date(visible_left, sports_counts_df, baseball_df, "games_baseball", info_date_col="date")
     kleague_map  = build_single_day_titles_by_date(visible_left, sports_counts_df, kleague_df,  "games_soccer",   info_date_col="date")
-
-    # 합치기
     out = {}
     for d in visible_left:
         d0 = d.normalize()
@@ -832,27 +936,102 @@ def _build_integrated_map_for_range(s: pd.Timestamp, e: pd.Timestamp) -> dict:
             out[d0] = items
     return out
 
-if integrated_map is None:
-    # 실적 기간(l_s~l_e)을 기준으로 즉석 생성 (상단에서 이미 l_s, l_e 계산됨)
-    integrated_map = _build_integrated_map_for_range(l_s, l_e)
-    st.session_state["integrated_event_map"] = integrated_map  # 캐시
+# ── 세션에 없거나 기간 바뀌면 선생성
+_prev = st.session_state.get("_evt_map_range", None)
+_cur = (l_s, l_e)
+need_build = ("integrated_event_map" not in st.session_state) or (_prev != _cur)
+if need_build:
+    st.session_state["integrated_event_map"] = _build_integrated_map_for_range(l_s, l_e)
+    st.session_state["_evt_map_range"] = _cur
 
-# 3) 화면 출력
-st.markdown("#### 🔎 선택한 일자 이벤트")
-if not _selected_dates:
-    st.info("체크한 날짜가 없습니다.")
-else:
-    for d in _selected_dates:
-        # 날짜 라벨 (요일 포함)
-        pretty = fmt_date_ko(pd.Series([d])).iloc[0]
-        events = integrated_map.get(d, [])
-        st.write(f"**{pretty}**")
-        if events:
-            for t in events:
-                st.markdown(f"- {t}")
+# ---- (도우미) 전치 테이블의 인덱스에 맞춰 안전하게 컬럼 추가 (재사용용)
+def _append_aligned_column(T: pd.DataFrame, dates: pd.Series, values: list, col_name: str):
+    if T is None or T.empty:
+        return T
+    date_labels = list(fmt_date_ko(pd.Series(dates)))
+    mapping = {lbl: val for lbl, val in zip(date_labels, values)}
+    aligned = []
+    for idx in T.index:
+        if str(idx) == "합계":
+            aligned.append("")
         else:
-            st.markdown("- (표시할 이벤트가 없습니다)")
+            aligned.append(mapping.get(idx, ""))
+    T[col_name] = aligned
+    return T
 
+# ---- 스타일 (주말 색) ── st.data_editor로 변경하면서 사용 X, 필요 시 컬럼으로 대체 가능
+def _style_weekend_rows(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    blue_text = "#1e90ff"; red_text = "#ef4444"
+    sty = df.style.set_properties(**{"text-align":"center"}).set_table_styles([{"selector":"th","props":"text-align:center;"}])
+    if "합계" in df.index:
+        sty = sty.set_properties(subset=(["합계"], df.columns), **{"font-weight":"bold","background-color": SUM_BG})
+    for idx in df.index:
+        if isinstance(idx, str) and "(토)" in idx:
+            sty = sty.set_properties(subset=([idx], df.columns), **{"color": blue_text})
+        if isinstance(idx, str) and "(일)" in idx:
+            sty = sty.set_properties(subset=([idx], df.columns), **{"color": red_text})
+    return sty
+
+# ---- 출력 (전치표 + 체크박스 + 선택된 일자 이벤트) ----
+c1, c2 = st.columns(2)
+with c1:
+    st.markdown("**실적 기간 (전치)**")
+    if left_T.empty:
+        st.info("실적 기간 데이터가 없습니다.")
+    else:
+        # 인덱스('일자')를 컬럼으로 꺼내고 '외부요인' 옆에 체크박스 추가
+        left_T.index.name = "일자"
+        left_edit = left_T.reset_index()
+
+        insert_pos = left_edit.columns.get_loc("외부요인") + 1 if "외부요인" in left_edit.columns else len(left_edit.columns)
+        if "선택" not in left_edit.columns:
+            left_edit.insert(insert_pos, "선택", False)
+
+        edited_left = st.data_editor(
+            left_edit,
+            hide_index=True,
+            use_container_width=True,
+            height=min(520, 140 + 28 * max(3, len(left_edit))),
+            column_config={
+                "선택": st.column_config.CheckboxColumn(
+                    "선택", help="해당 일자의 이벤트를 선택합니다.", default=False,
+                ),
+            },
+            disabled=["일자"],  # 날짜 수정 방지
+        )
+
+        # 체크된 날짜 저장 (합계 제외)
+        selected_mask = (edited_left.get("선택") == True) & (edited_left.get("일자") != "합계")
+        st.session_state["selected_event_dates_from_matrix"] = edited_left.loc[selected_mask, "일자"].tolist()
+
+        # ==== 체크된 날짜의 이벤트 세로 나열 ====
+        def _label_to_date(lbl: str):
+            try:
+                s = str(lbl).strip()
+                iso = s[:10]
+                dt = pd.to_datetime(iso, errors="coerce")
+                return None if pd.isna(dt) else dt.normalize()
+            except Exception:
+                return None
+
+        _selected_labels = st.session_state.get("selected_event_dates_from_matrix", []) or []
+        _selected_dates = [d for d in (_label_to_date(x) for x in _selected_labels) if d is not None]
+        _selected_dates = sorted(set(_selected_dates))
+
+        integrated_map = st.session_state.get("integrated_event_map", {})
+        st.markdown("#### 🔎 선택한 일자 이벤트")
+        if not _selected_dates:
+            st.info("체크한 날짜가 없습니다.")
+        else:
+            for d0 in _selected_dates:
+                pretty = fmt_date_ko(pd.Series([d0])).iloc[0]
+                events = integrated_map.get(d0, [])
+                st.write(f"**{pretty}**")
+                if events:
+                    for t in events:
+                        st.markdown(f"- {t}")
+                else:
+                    st.markdown("- (표시할 이벤트가 없습니다)")
 
 with c2:
     st.markdown("**예측 기간 (전치)**")
@@ -863,58 +1042,34 @@ with c2:
         st.dataframe(_style_weekend_rows(right_T), use_container_width=True,
                      height=min(520, 140 + 28 * max(3, len(right_T))))
 
-
-
 # ===================== 9월 예측 정확도 (실적 vs 예측) =====================
 st.markdown("#### 🎯 예측 정확도 (실적 vs 예측)")
-
 
 SEP_START = pd.to_datetime("2025-09-01")
 SEP_END   = pd.to_datetime("2025-09-30")
 
 @st.cache_data(show_spinner=False)
 def load_actual_sep_df() -> pd.DataFrame:
-    """
-    actual_sep_rows.csv에서 2025-09-01 ~ 2025-09-30 일자별 실적을 로드.
-    - 다양한 컬럼명/형식을 견고하게 처리
-    - 날짜 컬럼 자동 추론: travel_date / date / 일자 / 날짜 / (연,월,일 조합)
-    - 숫자 전처리: 쉼표/공백/통화기호 제거 후 numeric 캐스팅
-    - 동일 일자 중복 합산
-    """
     SEP_START = pd.to_datetime("2025-09-01")
     SEP_END   = pd.to_datetime("2025-09-30")
-
     try:
         raw = load_df_from_repo_csv("actual_sep_rows.csv").copy()
     except FileNotFoundError:
         st.warning("'actual_sep_rows.csv' 파일을 찾을 수 없습니다. (9월 정확도 표 생략)")
         return pd.DataFrame(columns=["date","passengers","sales_amount"])
-
     if raw.empty:
         st.warning("actual_sep_rows.csv가 비어 있습니다.")
         return pd.DataFrame(columns=["date","passengers","sales_amount"])
-
-    # 1) 컬럼명 표준화
     df = raw.copy()
     df.columns = [str(c).strip().lower() for c in df.columns]
-
-    # 2) 날짜 컬럼 추론
-    date_col_candidates = [
-        "travel_date","date","일자","날짜","ts","dt"
-    ]
-    ymd_candidates = [
-        ("year","month","day"),
-        ("yyyy","mm","dd"),
-        ("y","m","d"),
-        ("s_y","s_m","s_d"),  # 종종 쓰던 포맷 대응
-    ]
+    date_col_candidates = ["travel_date","date","일자","날짜","ts","dt"]
+    ymd_candidates = [("year","month","day"),("yyyy","mm","dd"),("y","m","d"),("s_y","s_m","s_d")]
     date_series = None
     for c in date_col_candidates:
         if c in df.columns:
             date_series = pd.to_datetime(df[c], errors="coerce")
             break
     if date_series is None:
-        # 연/월/일 분리형 조합 시도
         for y,m,d in ymd_candidates:
             if y in df.columns and m in df.columns and d in df.columns:
                 yv = pd.to_numeric(df[y], errors="coerce")
@@ -930,108 +1085,56 @@ def load_actual_sep_df() -> pd.DataFrame:
     if date_series is None:
         st.warning("actual_sep_rows.csv에서 날짜 컬럼을 찾을 수 없습니다. (travel_date/date/일자/날짜 또는 연·월·일 조합 필요)")
         return pd.DataFrame(columns=["date","passengers","sales_amount"])
-
     df["date"] = pd.to_datetime(date_series, errors="coerce").dt.normalize()
 
-    # 3) 승객/매출 컬럼 추론
-    def _pick_col(candidates: list[str]) -> str | None:
-        for c in candidates:
-            if c in df.columns:
-                return c
-        # 부분 일치(예: 'sales amount', '매출(원)')
+    def _pick_col(cands):
+        for c in cands:
+            if c in df.columns: return c
         for c in df.columns:
-            for key in candidates:
-                if key in c:
-                    return c
+            for key in cands:
+                if key in c: return c
         return None
-
     pax_col = _pick_col(["passengers","pax","ridership","승객","승객수"])
     sales_col = _pick_col(["sales_amount","sales","revenue","amount","매출","매출액"])
-
-    if pax_col is None and sales_col is None:
-        st.warning("actual_sep_rows.csv에서 승객/매출 컬럼을 찾을 수 없습니다.")
-        return pd.DataFrame(columns=["date","passengers","sales_amount"])
-
-    # 4) 숫자 전처리 유틸
     def to_numeric_clean(s):
-        if s is None:
-            return pd.Series(dtype="float64")
-        return (
-            pd.Series(s, dtype="object")
-            .astype(str)
-            .str.replace(r"[,\s₩원$₩]", "", regex=True)
-            .replace({"": np.nan, "nan": np.nan})
-            .pipe(pd.to_numeric, errors="coerce")
-        )
-
-    if pax_col is not None:
-        df["passengers"] = to_numeric_clean(df[pax_col])
-    else:
-        df["passengers"] = np.nan
-
-    if sales_col is not None:
-        df["sales_amount"] = to_numeric_clean(df[sales_col])
-    else:
-        df["sales_amount"] = np.nan
-
-    # 5) 유효 로우만 남기고 일자별 합산
+        if s is None: return pd.Series(dtype="float64")
+        return (pd.Series(s, dtype="object").astype(str)
+                .str.replace(r"[,\s₩원$₩]", "", regex=True)
+                .replace({"": np.nan, "nan": np.nan})
+                .pipe(pd.to_numeric, errors="coerce"))
+    df["passengers"] = to_numeric_clean(df[pax_col]) if pax_col else np.nan
+    df["sales_amount"] = to_numeric_clean(df[sales_col]) if sales_col else np.nan
     df = df.dropna(subset=["date"])
     if df[["passengers","sales_amount"]].isna().all(axis=None):
         st.warning("actual_sep_rows.csv의 승객/매출 값이 모두 결측입니다.")
         return pd.DataFrame(columns=["date","passengers","sales_amount"])
-
     daily = (df.groupby("date", as_index=False)[["passengers","sales_amount"]]
-               .sum(min_count=1)  # 전부 NaN이면 NaN 유지
-               .sort_values("date"))
-
-    # 6) 9월 기간 필터
+               .sum(min_count=1).sort_values("date"))
     daily = daily[(daily["date"] >= SEP_START) & (daily["date"] <= SEP_END)]
-
     if daily.empty:
         st.info("actual_sep_rows.csv에서 2025-09 기간에 해당하는 데이터가 없습니다.")
-        # 디버그 도움말
-        with st.expander("🔎 디버그: 원본 날짜 분포 보기"):
-            try:
-                tmp = pd.to_datetime(raw.iloc[:,0], errors="coerce")
-                st.write("첫 번째 컬럼을 날짜로 캐스팅한 예시(무관할 수 있음):", tmp.min(), "~", tmp.max())
-            except Exception:
-                st.write("원본 미리보기:", raw.head())
         return pd.DataFrame(columns=["date","passengers","sales_amount"])
-
     return daily[["date","passengers","sales_amount"]]
-
-
 
 def _safe_pct_err(forecast, actual):
     if pd.isna(actual) or actual == 0:
         return np.nan
     return (forecast - actual) / actual * 100.0
 
-
-# --- 데이터 준비: 9월 실적 / 예측
 actual_sep = load_actual_sep_df()
-
-# forecast_pass.csv (승객) + forecast_sales.csv (매출)에서 9월만
 fcst_pass_sep = forecast_df_all[(forecast_df_all["date"] >= SEP_START) & (forecast_df_all["date"] <= SEP_END)][["date","passengers"]].rename(columns={"passengers":"f_passengers"})
 fcst_sales_sep = forecast_sales_all[(forecast_sales_all["date"] >= SEP_START) & (forecast_sales_all["date"] <= SEP_END)][["date","pred_sales_amount"]].rename(columns={"pred_sales_amount":"f_sales_amount"})
-
 fcst_sep = pd.merge(fcst_pass_sep, fcst_sales_sep, on="date", how="outer").sort_values("date")
-
-# --- 예측 기간 연동 (r_s, r_e)
-sel_start = max(r_s, SEP_START)
-sel_end   = min(r_e, SEP_END)
+sel_start = max(r_s, SEP_START); sel_end = min(r_e, SEP_END)
 cmp = pd.merge(fcst_sep, actual_sep, on="date", how="outer")
 cmp = cmp[(cmp["date"] >= sel_start) & (cmp["date"] <= sel_end)].sort_values("date").reset_index(drop=True)
-
 cmp["a_passengers"]   = pd.to_numeric(cmp.get("passengers"), errors="coerce")
 cmp["a_sales_amount"] = pd.to_numeric(cmp.get("sales_amount"), errors="coerce")
 cmp["f_passengers"]   = pd.to_numeric(cmp.get("f_passengers"), errors="coerce")
 cmp["f_sales_amount"] = pd.to_numeric(cmp.get("f_sales_amount"), errors="coerce")
-
 cmp["pax_err_pct"]   = [ _safe_pct_err(fp, ap) for fp, ap in zip(cmp["f_passengers"], cmp["a_passengers"]) ]
 cmp["sales_err_pct"] = [ _safe_pct_err(fs, as_) for fs, as_ in zip(cmp["f_sales_amount"], cmp["a_sales_amount"]) ]
 
-# --- 표 생성 (단위: 매출=백만원, 승객=천명)
 disp = pd.DataFrame({
     "일자": fmt_date_ko(cmp["date"].dt.tz_localize(None)) if "date" in cmp.columns else pd.Series(dtype=str),
     "실적|매출액(백만원)":  (cmp["a_sales_amount"] / 1_000_000).round(0).astype("Int64"),
@@ -1042,7 +1145,6 @@ disp = pd.DataFrame({
     "오차율|승객수(%)":   cmp["pax_err_pct"].map(lambda x: f"{x:.1f}" if not pd.isna(x) else ""),
 })
 
-# --- 합계행 (MAPE)
 def _mape_pct(f, a):
     s = [abs((fv - av)/av)*100.0 for fv, av in zip(f, a) if (not pd.isna(av) and av!=0 and not pd.isna(fv))]
     return np.nan if len(s)==0 else float(np.mean(s))
@@ -1054,7 +1156,7 @@ sum_f_sales = cmp["f_sales_amount"].sum(skipna=True)
 mape_pax   = _mape_pct(cmp["f_passengers"], cmp["a_passengers"])
 mape_sales = _mape_pct(cmp["f_sales_amount"], cmp["a_sales_amount"])
 
-sum_row = pd.DataFrame([{
+sum_row2 = pd.DataFrame([{
     "일자": "합계",
     "실적|매출액(백만원)": int(round(sum_a_sales/1_000_000)) if not pd.isna(sum_a_sales) else pd.NA,
     "예측|매출액(백만원)": int(round(sum_f_sales/1_000_000)) if not pd.isna(sum_f_sales) else pd.NA,
@@ -1064,12 +1166,10 @@ sum_row = pd.DataFrame([{
     "오차율|승객수(%)":    round(mape_pax, 1) if not pd.isna(mape_pax) else pd.NA,
 }])
 
-disp_out = pd.concat([sum_row, disp], ignore_index=True)
+disp_out = pd.concat([sum_row2, disp], ignore_index=True)
 
-# --- 주말은 글씨색으로만 표시
 def _weekday_textcolor_only_df(_df: pd.DataFrame) -> pd.DataFrame:
-    blue_text = "#1e90ff"
-    red_text  = "#ef4444"
+    blue_text = "#1e90ff"; red_text  = "#ef4444"
     styles = pd.DataFrame("", index=_df.index, columns=_df.columns)
     for i in _df.index[1:]:
         d = str(_df.at[i, "일자"]) if "일자" in _df.columns else ""
@@ -1081,7 +1181,6 @@ def _weekday_textcolor_only_df(_df: pd.DataFrame) -> pd.DataFrame:
         styles.loc[0, :] = [f"font-weight:bold; background-color:{SUM_BG};"] * styles.shape[1]
     return styles
 
-# --- 표시
 st.dataframe(
     disp_out.style
         .set_properties(**{"text-align":"center"})
@@ -1090,6 +1189,3 @@ st.dataframe(
     use_container_width=True,
     height=min(520, 120 + 28 * (len(disp_out)+1))
 )
-
-
-
