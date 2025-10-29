@@ -1,0 +1,28 @@
+id,date,year,month,day,city,stadium,attendance
+1,2021-06-05,2021,6,5,Goyang,Goyang Stadium,3932
+2,2021-06-13,2021,6,13,Goyang,Goyang Stadium,4061
+3,2021-09-02,2021,9,2,Seoul,Seoul World Cup Stadium,0
+4,2021-09-07,2021,9,7,Suwon,Suwon World Cup Stadium,0
+5,2021-10-07,2021,10,7,Ansan,Wa~ Stadium,0
+6,2021-11-11,2021,11,11,Goyang,Goyang Stadium,30152
+7,2022-03-24,2022,3,24,Seoul,Seoul World Cup Stadium,64375
+8,2022-06-02,2022,6,2,Seoul,Seoul World Cup Stadium,64872
+9,2022-06-06,2022,6,6,Daejeon,Daejeon World Cup Stadium,40135
+10,2022-06-10,2022,6,10,Suwon,Suwon World Cup Stadium,40228
+11,2022-06-14,2022,6,14,Seoul,Seoul World Cup Stadium,59712
+12,2022-09-23,2022,9,23,Goyang,Goyang Stadium,37581
+13,2022-09-27,2022,9,27,Seoul,Seoul World Cup Stadium,59389
+14,2022-11-11,2022,11,11,Hwaseong,Hwaseong Stadium,15274
+15,2023-03-24,2023,3,24,Ulsan,Ulsan Munsu Stadium,35727
+16,2023-03-28,2023,3,28,Seoul,Seoul World Cup Stadium,63952
+17,2023-06-16,2023,6,16,Busan,Busan Asiad Stadium,52443
+18,2023-06-20,2023,6,20,Daejeon,Daejeon World Cup Stadium,39823
+19,2023-10-13,2023,10,13,Seoul,Seoul World Cup Stadium,59018
+20,2023-10-17,2023,10,17,Suwon,Suwon World Cup Stadium,42175
+21,2023-11-16,2023,11,16,Seoul,Seoul World Cup Stadium,64381
+22,2024-06-11,2024,6,11,Seoul,Seoul World Cup Stadium,64935
+23,2024-09-05,2024,9,5,Seoul,Seoul World Cup Stadium,59579
+24,2024-10-15,2024,10,15,Yongin,Yongin Mir Stadium,35198
+25,2025-03-20,2025,3,20,Goyang,Goyang Stadium,35212
+26,2025-03-25,2025,3,25,Suwon,Suwon World Cup Stadium,41582
+27,2025-06-10,2025,6,10,Seoul,Seoul World Cup Stadium,41911
