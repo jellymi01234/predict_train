@@ -3,11 +3,14 @@
 import io
 from pathlib import Path
 from datetime import date, timedelta
+from pandas.io.formats.style import Styler
+
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 import re
+
 
 # ✅ Ag-Grid (합계행 상단 고정 & 컬럼 필터/정렬/선택 지원) ── (사용 안 해도 됨: 데이터 매트릭스는 st.data_editor 사용)
 try:
@@ -16,12 +19,12 @@ except Exception as _e:
     AgGrid = None
 
 # ================= 기본 설정 =================
-st.set_page_config(page_title="Passengers & Sales (Dual Axis)", layout="wide")
+st.set_page_config(page_title="외부요인 기반 빅데이터 철도 수요예측 플랫폼", layout="wide")
 
 # ======= 상단 타이틀 + 다크모드 토글 =======
 title_col, theme_col = st.columns([1,0.18])
 with title_col:
-    st.title("📈 외부요인 기반 철도수요예측 시스템")
+    st.title("📈 외부요인 기반 빅데이터 철도 수요예측 플랫폼")
 with theme_col:
     DARK = st.checkbox("🌙 다크 모드", value=False)
 
@@ -252,24 +255,141 @@ def build_holiday_labels(dates_index: pd.DatetimeIndex, holidays_df: pd.DataFram
             fulls.append("")
     return labels, fulls
 
+import streamlit as st
+
+def set_sidebar_font(size_px: int = 16, label_px: int | None = None, line_height: float = 1.35):
+    """
+    Streamlit 사이드바 폰트 크기/줄간격을 CSS로 일괄 조정합니다.
+    - size_px: 사이드바 기본 폰트 크기(px)
+    - label_px: 위젯 라벨(예: radio, date_input 라벨) 크기(px). None이면 size_px 사용
+    - line_height: 줄간격
+    """
+    if label_px is None:
+        label_px = size_px
+    st.markdown(
+        f"""
+        <style>
+        /* 사이드바 영역 전체 */
+        [data-testid="stSidebar"] * {{
+            font-size: {size_px}px !important;
+            line-height: {line_height} !important;
+        }}
+        /* 섹션 헤더/서브헤더(크게 보이게 약간 증폭) */
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3 {{
+            font-size: {int(size_px*1.15)}px !important;
+            font-weight: 700 !important;
+        }}
+        /* 위젯 라벨(예: radio, date_input 레이블) */
+        [data-testid="stSidebar"] label,
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stWidgetLabel"] label {{
+            font-size: {label_px}px !important;
+            font-weight: 600 !important;
+        }}
+        /* date_input 필드 내부 글자 */
+        [data-testid="stSidebar"] [data-testid="stDateInput"] input {{
+            font-size: {size_px}px !important;
+        }}
+        /* radio 항목 라벨 */
+        [data-testid="stSidebar"] [data-testid="stRadio"] label p {{
+            font-size: {size_px}px !important;
+        }}
+        /* 구분선 여백 살짝 넉넉하게 */
+        [data-testid="stSidebar"] hr {{
+            margin: 0.6rem 0 !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+import streamlit as st
+
+def set_sidebar_style(font_size=16, line_height=1.6, paragraph_gap="0.8rem"):
+    """
+    Streamlit 사이드바 폰트 및 문단 간격 스타일 설정
+    - font_size: 기본 폰트 크기(px)
+    - line_height: 줄 간격(line-height)
+    - paragraph_gap: 문단(p, div 등) 사이 여백 (rem 또는 px)
+    """
+    st.markdown(
+        f"""
+        <style>
+        [data-testid="stSidebar"] * {{
+            font-size: {font_size}px !important;
+            line-height: {line_height} !important;
+        }}
+        /* 문단 간 간격 */
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] div,
+        [data-testid="stSidebar"] label {{
+            margin-bottom: {paragraph_gap} !important;
+        }}
+        /* 위젯 간 여백도 넉넉하게 */
+        [data-testid="stSidebar"] .stRadio,
+        [data-testid="stSidebar"] .stDateInput,
+        [data-testid="stSidebar"] .stSelectbox {{
+            margin-bottom: {paragraph_gap} !important;
+        }}
+        /* 구분선(hr) 상하 여백 */
+        [data-testid="stSidebar"] hr {{
+            margin: 1rem 0 !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+# ===================== 스타일: 사이드바 폰트 =====================
+set_sidebar_font(size_px=20, label_px=18, line_height=1.4)
+
 # ===================== 사이드바: 기간 선택 =====================
+# ===== 스타일 설정 =====
+set_sidebar_style(font_size=17, line_height=1.6, paragraph_gap="0.6rem")
+
+# ===== 사이드바 예시 =====
 st.sidebar.markdown("---")
 st.sidebar.subheader("📅 기간 선택")
 
 default_right_start = date(2025, 9, 1)
 default_right_end   = date(2025, 9, 7)
 right_range = st.session_state.get("right_range", (default_right_start, default_right_end))
-right_sel = st.sidebar.date_input("① 예측 기간 (YYYY-MM-DD)",
-    value=right_range, min_value=FCT_START.date(), max_value=FCT_END.date(), key="right_picker_sidebar")
+right_sel = st.sidebar.date_input(
+    "① 예측 기간 (YYYY-MM-DD)",
+    value=right_range, min_value=FCT_START.date(), max_value=FCT_END.date(), key="right_picker_sidebar"
+)
 
-left_mode = st.sidebar.radio("② 실적 기간 모드",
-    options=["사용 안 함 (예측만)", "전년도 동일(일자)", "전년도 동일(요일)", "사용자 지정"], index=1, key="left_mode_sidebar")
+# ── (교체) 실적 기간 모드: 가로 라디오, (O) 느낌
+mode_options = ["사용 안함 (예측만)", "전년도 동일(일자)", "전년도 동일(요일)", "사용자 지정"]
+st.sidebar.markdown(
+    """
+    <style>
+    /* 사이드바 라디오를 가로로 보기 좋게 */
+    [data-testid="stSidebar"] [role="radiogroup"] { gap: 10px !important; }
+    [data-testid="stSidebar"] [data-baseweb="radio"] { margin-right: 8px !important; }
+    [data-testid="stSidebar"] [data-baseweb="radio"] label p { font-weight: 600 !important; }
+    </style>
+    """, unsafe_allow_html=True
+)
+left_mode = st.sidebar.radio(
+    "② 실적 기간 모드",
+    options=mode_options,
+    index=1,
+    key="left_mode_sidebar",
+    horizontal=True,  # ← 가로 배치
+)
 
-left_sel = None
+
 if left_mode == "사용자 지정":
     left_range = st.session_state.get("left_range", (date(2024, 9, 1), date(2024, 9, 7)))
-    left_sel = st.sidebar.date_input("실적 기간 (YYYY-MM-DD)",
-        value=left_range, min_value=ACT_START.date(), max_value=ACT_END.date(), key="left_picker_sidebar")
+    left_sel = st.sidebar.date_input(
+        "실적 기간 (YYYY-MM-DD)",
+        value=left_range, min_value=ACT_START.date(), max_value=ACT_END.date(), key="left_picker_sidebar"
+    )
+
 
 # ================= 기간 정규화/동기화 =================
 def norm_tuple(sel):
@@ -279,7 +399,7 @@ r_s, r_e = map(pd.to_datetime, norm_tuple(right_sel))
 r_s, r_e = ensure_in_range(r_s, r_e, FCT_START, FCT_END)
 N_days = (r_e - r_s).days + 1
 
-if left_mode == "사용 안 함 (예측만)":
+if left_mode == "사용 안함 (예측만)":
     l_s, l_e = None, None
 elif left_mode == "전년도 동일(일자)":
     l_s = (r_s - pd.DateOffset(years=1)).normalize(); l_e = l_s + pd.Timedelta(days=N_days-1)
@@ -334,97 +454,109 @@ category_array = (
 if not df_sel.empty:
     df_sel["x_cat"] = df_sel.apply(lambda r: f"{'실적' if r['period']=='실적기간' else '예측'}|{r['date'].strftime('%Y-%m-%d')}", axis=1)
 
-# =================== 그래프 패널 ===================
+# =================== 그래프 패널(분리) ===================
 st.markdown('<div class="panel">', unsafe_allow_html=True)
-st.subheader("예측그래프")
+st.subheader("📊그래프")
 
 sp, cSales, cPax = st.columns([8,1.6,1.6])
 with cSales: show_sales = st.checkbox("매출액", True, key="cb_sales")
 with cPax:   show_pax   = st.checkbox("승객수", True, key="cb_pax")
 
-st.markdown(
-    """
-    <div class="legend-row" style="margin-top:4px;">
-      <div><span class="lg-line"></span><span class="lg-text">매출액(실적)</span></div>
-      <div><span class="lg-line-dash"></span><span class="lg-text">매출액(예측)</span></div>
-      <div><span class="lg-bar"></span><span class="lg-text">승객수(실적)</span></div>
-      <div><span class="lg-bar-f"></span><span class="lg-text">승객수(예측)</span></div>
-    </div>
-    """, unsafe_allow_html=True
-)
+def _add_watermark(fig, text: str):
+    # 투명도 있는 워터마크 (레이어: below)
+    fig.add_annotation(
+        x=0.5, y=0.5, xref="paper", yref="paper",
+        text=text, showarrow=False,
+        font=dict(size=48, color="rgba(0,0,0,0.08)"),
+        align="center", opacity=1.0
+    )
+    # 배경/플롯 색상 일치 & 그리드 보이되 은은하게
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        paper_bgcolor=PANEL_BG, plot_bgcolor=PANEL_BG,
+        xaxis=dict(showgrid=True), yaxis=dict(showgrid=True),
+        margin=dict(t=24, r=30, b=60, l=70),
+        showlegend=False,
+        font=dict(family="Nanum Gothic, Malgun Gothic, AppleGothic, Noto Sans KR, Sans-Serif", size=13, color=TEXT),
+    )
 
-fig = go.Figure(); color_sales="#1f77b4"; color_pax="#ff7f0e"
-shapes = []
-if len(order_left)>0:
-    shapes.append(dict(type="rect", xref="x", yref="paper", x0=category_array[0], x1=category_array[len(order_left)-1], y0=0, y1=1, fillcolor=HILITE2, line=dict(width=0), layer="below"))
-if len(order_right)>0:
-    shapes.append(dict(type="rect", xref="x", yref="paper", x0=category_array[len(order_left)], x1=category_array[-1], y0=0, y1=1, fillcolor=HILITE1, line=dict(width=0), layer="below"))
+def _build_single_fig(df: pd.DataFrame, title_text: str):
+    fig = go.Figure()
+    if df.empty:
+        _add_watermark(fig, title_text)
+        return fig
 
-if show_pax and not df_sel.empty:
-    act_plot = df_sel[df_sel["source"].eq("actual")]; fct_plot = df_sel[df_sel["source"].eq("forecast")]
-    if not act_plot.empty:
-        fig.add_trace(go.Bar(x=act_plot["x_cat"], y=act_plot["passengers_k"], name="승객수(실적)",
-                             marker=dict(color=color_pax, line=dict(width=0)), opacity=0.55, offsetgroup="pax", yaxis="y2",
-                             hovertemplate="<b>%{x}</b><br>승객수: %{y:,.0f} 천명<extra></extra>"))
-    if not fct_plot.empty:
-        fig.add_trace(go.Bar(x=fct_plot["x_cat"], y=fct_plot["passengers_k"], name="승객수(예측)",
-                             marker=dict(color=color_pax, pattern=dict(shape="/", fgcolor="rgba(0,0,0,0.45)", solidity=0.40), line=dict(width=0)),
-                             opacity=0.38, offsetgroup="pax", yaxis="y2",
-                             hovertemplate="<b>%{x}</b><br>승객수(예측): %{y:,.0f} 천명<extra></extra>"))
+    # 승객수(막대, y2)
+    if show_pax and ("passengers_k" in df.columns):
+        fig.add_trace(go.Bar(
+            x=df["date"], y=df["passengers_k"], name="승객수",
+            marker=dict(line=dict(width=0)),
+            opacity=0.55, yaxis="y2",
+            hovertemplate="<b>%{x|%Y-%m-%d}</b><br>승객수: %{y:,.0f} 천명<extra></extra>"
+        ))
+    # 매출(선, y1)
+    if show_sales and ("sales_million" in df.columns):
+        fig.add_trace(go.Scatter(
+            x=df["date"], y=df["sales_million"], name="매출액", mode="lines+markers",
+            line=dict(width=2.6), marker=dict(size=6),
+            yaxis="y1", connectgaps=True,
+            hovertemplate="<b>%{x|%Y-%m-%d}</b><br>매출액: %{y:,.0f} 백만원<extra></extra>"
+        ))
 
-if show_sales and not df_sel.empty:
-    act_sales = df_sel[df_sel["source"].eq("actual")]; fct_sales = df_sel[df_sel["source"].eq("forecast")]
-    if not act_sales.empty:
-        fig.add_trace(go.Scatter(x=act_sales["x_cat"], y=act_sales["sales_million"], name="매출액(실적)", mode="lines+markers",
-                                 line=dict(color=color_sales, width=2.6), marker=dict(size=6, color=color_sales),
-                                 yaxis="y1", connectgaps=True,
-                                 hovertemplate="<b>%{x}</b><br>매출액: %{y:,.0f} 백만원<extra></extra>"))
-    if not fct_sales.empty:
-        fig.add_trace(go.Scatter(x=fct_sales["x_cat"], y=fct_sales["sales_million"], name="매출액(예측)", mode="lines",
-                                 line=dict(color=color_sales, width=3.5, dash="dash"),
-                                 yaxis="y1", connectgaps=True, hoverinfo="skip"))
-    if (not act_sales.empty) and (not fct_sales.empty):
-        la = act_sales.sort_values("date").iloc[-1]; ff = fct_sales.sort_values("date").iloc[0]
-        if pd.notna(la["sales_million"]) and pd.notna(ff["sales_million"]):
-            fig.add_trace(go.Scatter(x=[la["x_cat"], ff["x_cat"]], y=[la["sales_million"], ff["sales_million"]],
-                                     mode="lines", line=dict(color=color_sales, width=2.0), yaxis="y1",
-                                     hoverinfo="skip", showlegend=False))
+    # 듀얼축
+    fig.update_layout(
+        xaxis=dict(title="", type="date", tickformat="%Y-%m-%d", tickangle=-45),
+        yaxis=dict(title="매출액(백만원)", tickformat=",.0f"),
+        yaxis2=dict(title="승객수(천명)", overlaying="y", side="right", tickformat=",.0f"),
+        barmode="group", bargap=0.15, bargroupgap=0.05,
+    )
 
-tickvals, ticktext = [], []
-if len(category_array)>0:
-    step = max(1, len(category_array)//6)
-    for i in range(0, len(category_array), step):
-        tickvals.append(category_array[i]); ticktext.append(category_array[i].split("|")[1])
-    if category_array[-1] not in tickvals:
-        tickvals.append(category_array[-1]); ticktext.append(category_array[-1].split("|")[1])
+    _add_watermark(fig, title_text)
+    return fig
 
-left_mid_idx = len(order_left)//2 if len(order_left)>0 else None
-right_mid_idx= len(order_right)//2 if len(order_right)>0 else None
-left_mid_cat = category_array[left_mid_idx] if left_mid_idx is not None else None
-right_mid_cat= category_array[(len(order_left)+right_mid_idx)] if right_mid_idx is not None else None
+# 왼쪽/오른쪽 데이터 준비
+left_plot_df  = pd.DataFrame()
+right_plot_df = pd.DataFrame()
+if not left_df.empty:
+    left_plot_df = left_df.copy()
+    left_plot_df["sales_million"] = pd.to_numeric(left_plot_df["sales_amount"], errors="coerce")/1_000_000
+    left_plot_df["passengers_k"]  = pd.to_numeric(left_plot_df["passengers"],   errors="coerce")/1_000
+if not right_df.empty:
+    right_plot_df = right_df.copy()
+    right_plot_df["sales_million"] = pd.to_numeric(right_plot_df["sales_amount"], errors="coerce")/1_000_000
+    right_plot_df["passengers_k"]  = pd.to_numeric(right_plot_df["passengers"],   errors="coerce")/1_000
 
-fig.update_layout(template=PLOTLY_TEMPLATE, hovermode="x unified",
-    barmode="group", bargap=0.15, bargroupgap=0.05, shapes=shapes,
-    xaxis=dict(title="", type="category", categoryorder="array", categoryarray=category_array,
-               tickangle=-45, tickmode="array", tickvals=tickvals, ticktext=ticktext, showgrid=True),
-    yaxis=dict(title="매출액(백만원)", tickformat=",.0f", showgrid=True, zeroline=False),
-    yaxis2=dict(title="승객수(천명)", overlaying="y", side="right", tickformat=",.0f", showgrid=False, zeroline=False),
-    showlegend=False, margin=dict(t=24, r=50, b=60, l=70),
-    font=dict(family="Nanum Gothic, Malgun Gothic, AppleGothic, Noto Sans KR, Sans-Serif", size=13, color=TEXT),
-    annotations=[
-        *([dict(x=left_mid_cat,  y=0.50, xref="x", yref="paper", text="실적", showarrow=False, font=dict(size=24, color="#000"), align="center")] if left_mid_cat else []),
-        *([dict(x=right_mid_cat, y=0.50, xref="x", yref="paper", text="예측", showarrow=False, font=dict(size=24, color="#000"), align="center")] if right_mid_cat else []),
-    ],
-    paper_bgcolor=PANEL_BG, plot_bgcolor=PANEL_BG)
-
-st.plotly_chart(fig, use_container_width=True, config=dict(displaylogo=False,
-    toImageButtonOptions=dict(format="png", filename=f"dual_axis_blocks_{date.today()}", scale=2),
-    modeBarButtonsToAdd=["hovercompare"]))
-
-if l_s is not None:
-    st.caption(f"실적(좌): {l_s.date()} ~ {l_e.date()} · 예측(우): {r_s.date()} ~ {r_e.date()} · 길이 {N_days}일 (동일)")
+# 레이아웃: 실적이 없으면 예측이 전폭 사용
+if left_plot_df.empty:
+    fig_right = _build_single_fig(right_plot_df, "예측")
+    st.plotly_chart(
+        fig_right, use_container_width=True,
+        config=dict(displaylogo=False,
+                    toImageButtonOptions=dict(format="png", filename=f"forecast_{date.today()}", scale=2),
+                    modeBarButtonsToAdd=["hovercompare"])
+    )
 else:
-    st.caption(f"예측만 표시: {r_s.date()} ~ {r_e.date()} · 길이 {N_days}일")
+    colL, colR = st.columns(2)
+    with colL:
+        st.markdown("**✅실적**")
+        fig_left = _build_single_fig(left_plot_df, "실적")
+        st.plotly_chart(
+            fig_left, use_container_width=True,
+            config=dict(displaylogo=False,
+                        toImageButtonOptions=dict(format="png", filename=f"actual_{date.today()}", scale=2),
+                        modeBarButtonsToAdd=["hovercompare"])
+        )
+    with colR:
+        st.markdown("**✅예측**")
+        fig_right = _build_single_fig(right_plot_df, "예측")
+        st.plotly_chart(
+            fig_right, use_container_width=True,
+            config=dict(displaylogo=False,
+                        toImageButtonOptions=dict(format="png", filename=f"forecast_{date.today()}", scale=2),
+                        modeBarButtonsToAdd=["hovercompare"])
+        )
+
+st.markdown('</div>', unsafe_allow_html=True)
 
 # ===================== 표(실적/예측) =====================
 left_dates  = pd.date_range(l_s, l_e, freq="D") if l_s is not None else pd.DatetimeIndex([])
@@ -532,7 +664,7 @@ if "예측|휴무여부" in table_df.columns: sum_row["예측|휴무여부"] = "
 if "예측|휴일명(풀)" in table_df.columns: sum_row["예측|휴일명(풀)"] = ""
 
 # ======== 매트릭스 렌더링 (실적/예측 분리) ========
-st.markdown("#### 📋 데이터 매트릭스 (행=일자, 열=지표)")
+st.markdown("#### 📋 데이터 표")
 
 # ---- 실적/예측 매트릭스 생성 함수 (동일)
 def _build_left_matrix() -> pd.DataFrame:
@@ -960,7 +1092,7 @@ def _append_aligned_column(T: pd.DataFrame, dates: pd.Series, values: list, col_
     return T
 
 # ---- 스타일 (주말 색) ── st.data_editor로 변경하면서 사용 X, 필요 시 컬럼으로 대체 가능
-def _style_weekend_rows(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+def _style_weekend_rows(df: pd.DataFrame) -> Styler:
     blue_text = "#1e90ff"; red_text = "#ef4444"
     sty = df.style.set_properties(**{"text-align":"center"}).set_table_styles([{"selector":"th","props":"text-align:center;"}])
     if "합계" in df.index:
@@ -975,7 +1107,7 @@ def _style_weekend_rows(df: pd.DataFrame) -> pd.io.formats.style.Styler:
 # ---- 출력 (전치표 + 체크박스 + 선택된 일자 이벤트) ----
 c1, c2 = st.columns(2)
 with c1:
-    st.markdown("**실적 기간 (전치)**")
+    st.markdown("**✅실적**")
     if left_T.empty:
         st.info("실적 기간 데이터가 없습니다.")
     else:
@@ -1000,47 +1132,106 @@ with c1:
             disabled=["일자"],  # 날짜 수정 방지
         )
 
-        # 체크된 날짜 저장 (합계 제외)
+        # ✅ 체크된 날짜 저장 (합계 제외) — 상세보기 표는 아래 전용 섹션에서 전체폭으로 렌더링
         selected_mask = (edited_left.get("선택") == True) & (edited_left.get("일자") != "합계")
         st.session_state["selected_event_dates_from_matrix"] = edited_left.loc[selected_mask, "일자"].tolist()
 
-        # ==== 체크된 날짜의 이벤트 세로 나열 ====
-        def _label_to_date(lbl: str):
-            try:
-                s = str(lbl).strip()
-                iso = s[:10]
-                dt = pd.to_datetime(iso, errors="coerce")
-                return None if pd.isna(dt) else dt.normalize()
-            except Exception:
-                return None
-
-        _selected_labels = st.session_state.get("selected_event_dates_from_matrix", []) or []
-        _selected_dates = [d for d in (_label_to_date(x) for x in _selected_labels) if d is not None]
-        _selected_dates = sorted(set(_selected_dates))
-
-        integrated_map = st.session_state.get("integrated_event_map", {})
-        st.markdown("#### 🔎 선택한 일자 이벤트")
-        if not _selected_dates:
-            st.info("체크한 날짜가 없습니다.")
-        else:
-            for d0 in _selected_dates:
-                pretty = fmt_date_ko(pd.Series([d0])).iloc[0]
-                events = integrated_map.get(d0, [])
-                st.write(f"**{pretty}**")
-                if events:
-                    for t in events:
-                        st.markdown(f"- {t}")
-                else:
-                    st.markdown("- (표시할 이벤트가 없습니다)")
-
 with c2:
-    st.markdown("**예측 기간 (전치)**")
+    st.markdown("**✅예측**")
     if right_T.empty:
         st.info("예측 기간 데이터가 없습니다.")
     else:
         right_T.index.name = "일자"
         st.dataframe(_style_weekend_rows(right_T), use_container_width=True,
                      height=min(520, 140 + 28 * max(3, len(right_T))))
+
+# ===================== 🔎 외부요인 상세보기 (전체 폭) =====================
+st.markdown("#### 🔎 외부요인 상세보기")
+
+def _label_to_date(lbl: str):
+    try:
+        s = str(lbl).strip()
+        iso = s[:10]
+        dt = pd.to_datetime(iso, errors="coerce")
+        return None if pd.isna(dt) else dt.normalize()
+    except Exception:
+        return None
+
+_selected_labels = st.session_state.get("selected_event_dates_from_matrix", []) or []
+_selected_dates = [d for d in (_label_to_date(x) for x in _selected_labels) if d is not None]
+_selected_dates = sorted(set(_selected_dates))
+
+integrated_map = st.session_state.get("integrated_event_map", {})
+
+if not _selected_dates:
+    st.info("체크한 날짜가 없습니다.")
+else:
+    def build_event_detail_df(selected_dates: list[pd.Timestamp], event_map: dict) -> dict:
+        """선택된 날짜별 개별 DataFrame 생성"""
+        result = {}
+        for d0 in selected_dates:
+            pretty = fmt_date_ko(pd.Series([d0])).iloc[0]
+            events = event_map.get(d0, [])
+            rows = []
+
+            if not events:
+                rows.append({"카테고리": "", "이벤트": "(표시할 이벤트가 없습니다)", "기간": "", "비고": ""})
+            else:
+                for t in events:
+                    raw = str(t).strip()
+                    # (카테고리) 제목 (2024-01-01~2024-01-03) 형태 분리
+                    m = re.match(r"^\(([^)]+)\)\s*(.*)$", raw)
+                    cat = m.group(1) if m else ""
+                    title = m.group(2) if m else raw
+
+                    # 카테고리 변환
+                    if cat.lower() == "concert":
+                        cat_kr = "콘서트"
+                    elif cat.lower() in ["coex", "bexco", "kintex"]:
+                        cat_kr = "박람회"
+                    elif cat.lower() in ["baseball", "k-league"]:
+                        cat_kr = "스포츠"
+                    else:
+                        cat_kr = cat
+
+                    # 기간 추출
+                    period_match = re.search(r"\((\d{4}-\d{2}-\d{2}~\d{4}-\d{2}-\d{2})\)", title)
+                    period = period_match.group(1) if period_match else ""
+                    title_clean = re.sub(r"\(\d{4}-\d{2}-\d{2}~\d{4}-\d{2}-\d{2}\)", "", title).strip()
+
+                    # 콘서트 외 카테고리는 "(카테고리)" 접두어 추가
+                    if cat_kr != "콘서트" and cat:
+                        title_clean = f"({cat}) " + title_clean
+
+                    rows.append({
+                        "카테고리": cat_kr,
+                        "이벤트": title_clean,
+                        "기간": period,
+                        "비고": ""
+                    })
+            result[d0] = pd.DataFrame(rows, columns=["카테고리", "이벤트", "기간", "비고"])
+        return result
+
+    # 날짜별 개별 표 생성
+    detail_map = build_event_detail_df(_selected_dates, integrated_map)
+
+    # 각 날짜별 표를 개별로 렌더링
+    for d0 in _selected_dates:
+        df_day = detail_map.get(d0, pd.DataFrame())
+        pretty = fmt_date_ko(pd.Series([d0])).iloc[0]
+        st.markdown(f"**📅 {pretty}**")
+        if df_day.empty:
+            st.info("이 날짜에는 표시할 이벤트가 없습니다.")
+        else:
+            st.dataframe(
+                df_day,
+                use_container_width=True,
+                height=min(380, 120 + 28 * (len(df_day) + 1))
+            )
+        st.markdown("---")
+
+
+
 
 # ===================== 9월 예측 정확도 (실적 vs 예측) =====================
 st.markdown("#### 🎯 예측 정확도 (실적 vs 예측)")
@@ -1181,11 +1372,82 @@ def _weekday_textcolor_only_df(_df: pd.DataFrame) -> pd.DataFrame:
         styles.loc[0, :] = [f"font-weight:bold; background-color:{SUM_BG};"] * styles.shape[1]
     return styles
 
-st.dataframe(
-    disp_out.style
-        .set_properties(**{"text-align":"center"})
-        .set_table_styles([{"selector":"th","props":"text-align:center;"}])
-        .apply(_weekday_textcolor_only_df, axis=None),
-    use_container_width=True,
-    height=min(520, 120 + 28 * (len(disp_out)+1))
-)
+# ==== 🎯 예측 정확도 표 수정 ====
+
+# ==== 🎯 예측 정확도 표 수정 ====
+
+# 숫자 포맷(천단위 콤마)
+def fmt_thousand(v):
+    try:
+        if pd.isna(v): return ""
+        return f"{int(round(v)):,}"
+    except Exception:
+        return str(v)
+
+disp_out_fmt = disp_out.copy()
+
+# 컬럼명 변경: '매출액', '승객수' 문구 제거
+disp_out_fmt = disp_out_fmt.rename(columns={
+    "실적|매출액(백만원)": "실적(백만원)",
+    "예측|매출액(백만원)": "예측(백만원)",
+    "오차율|매출액(%)": "오차율(%)",
+    "실적|승객수(천명)": "실적(천명)",
+    "예측|승객수(천명)": "예측(천명)",
+    "오차율|승객수(%)": "오차율(%)_승객"
+})
+
+# 숫자열 천단위 콤마 적용
+num_cols = ["실적(백만원)", "예측(백만원)", "실적(천명)", "예측(천명)"]
+for c in num_cols:
+    if c in disp_out_fmt.columns:
+        disp_out_fmt[c] = disp_out_fmt[c].apply(fmt_thousand)
+
+# 합계행 오차율 소수점 한자리 유지
+for c in ["오차율(%)", "오차율(%)_승객"]:
+    if c in disp_out_fmt.columns:
+        val = str(disp_out_fmt.loc[0, c])
+        if val.replace('.', '', 1).isdigit():
+            disp_out_fmt.loc[0, c] = f"{float(val):.1f}"
+
+# 왼쪽(매출), 오른쪽(승객) 표 분리
+disp_sales = disp_out_fmt[["일자", "실적(백만원)", "예측(백만원)", "오차율(%)"]].copy()
+disp_pax   = disp_out_fmt[["일자", "실적(천명)", "예측(천명)", "오차율(%)_승객"]].copy()
+disp_pax   = disp_pax.rename(columns={"오차율(%)_승객": "오차율(%)"})
+
+# 스타일 적용 (주말 색상, 합계 강조)
+def _weekday_textcolor_only_df(_df: pd.DataFrame) -> pd.DataFrame:
+    blue_text = "#1e90ff"; red_text  = "#ef4444"
+    styles = pd.DataFrame("", index=_df.index, columns=_df.columns)
+    for i in _df.index[1:]:
+        d = str(_df.at[i, "일자"]) if "일자" in _df.columns else ""
+        if "(토)" in d:
+            styles.loc[i, :] = [f"color:{blue_text};"] * styles.shape[1]
+        if "(일)" in d:
+            styles.loc[i, :] = [f"color:{red_text};"] * styles.shape[1]
+    if 0 in styles.index:
+        styles.loc[0, :] = [f"font-weight:bold; background-color:{SUM_BG};"] * styles.shape[1]
+    return styles
+
+# 두 표 나란히 출력
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("**💰 매출액**")
+    st.dataframe(
+        disp_sales.style
+            .set_properties(**{"text-align":"center"})
+            .set_table_styles([{"selector":"th","props":"text-align:center;"}])
+            .apply(_weekday_textcolor_only_df, axis=None),
+        use_container_width=True,
+        height=min(520, 120 + 28 * (len(disp_sales)+1))
+    )
+with col2:
+    st.markdown("**🚆 승객수**")
+    st.dataframe(
+        disp_pax.style
+            .set_properties(**{"text-align":"center"})
+            .set_table_styles([{"selector":"th","props":"text-align:center;"}])
+            .apply(_weekday_textcolor_only_df, axis=None),
+        use_container_width=True,
+        height=min(520, 120 + 28 * (len(disp_pax)+1))
+    )
+
