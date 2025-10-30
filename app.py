@@ -43,32 +43,7 @@ else:
     SUM_BG    = "rgba(30,144,255,0.08)"
 
 # ---- 글로벌 스타일 ----
-st.markdown(
-    f"""
-    <style>
-    html, body, .stApp {{ background: {BG}; color:{TEXT}; }}
-    .panel {{
-        border: 1px solid {BORDER};
-        background: {PANEL_BG};
-        border-radius: 12px;
-        padding: 12px 14px;
-        box-shadow: 0 4px 18px {SHADOW};
-        margin-bottom: 12px;
-    }}
-    .lg-line   {{ height:2px; border-top: 4px solid #1f77b4; border-radius:2px; display:inline-block; width:22px; margin-right:6px; }}
-    .lg-line-dash {{
-        height:0; display:inline-block; width:22px; margin-right:6px; position:relative; top:2px;
-        border-top: 0; background: repeating-linear-gradient(90deg, #1f77b4 0 6px, rgba(0,0,0,0) 6px 12px);
-    }}
-    .lg-bar    {{ background:#ff7f0e; display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; }}
-    .lg-bar-f  {{ background:#ff7f0e; opacity:0.7; display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; }}
-    .lg-text   {{ font-size: 13px; color:{TEXT}; vertical-align:middle; }}
-    .legend-row {{ display:flex; gap:18px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }}
-    div[data-testid="stDataFrame"] div[role="grid"] {{ background: {SURFACE}; }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+
 
 # ===== 기간 정의 =====
 ACT_START = pd.to_datetime("2020-08-01")
@@ -350,69 +325,214 @@ set_sidebar_font(size_px=20, label_px=18, line_height=1.4)
 # ===== 스타일 설정 =====
 set_sidebar_style(font_size=17, line_height=1.6, paragraph_gap="0.6rem")
 
+from datetime import date, timedelta
+
+
+# ===================== 사이드바: 기간 선택 =====================
+# ===== 스타일 설정 =====
+set_sidebar_style(font_size=17, line_height=1.6, paragraph_gap="0.6rem")
+
+from datetime import date, timedelta
+
 # ===== 사이드바 예시 =====
 st.sidebar.markdown("---")
 st.sidebar.subheader("📅 기간 선택")
 
-default_right_start = date(2025, 9, 1)
-default_right_end   = date(2025, 9, 7)
-right_range = st.session_state.get("right_range", (default_right_start, default_right_end))
-right_sel = st.sidebar.date_input(
-    "① 예측 기간 (YYYY-MM-DD)",
-    value=right_range, min_value=FCT_START.date(), max_value=FCT_END.date(), key="right_picker_sidebar"
-)
+# ---------- 안전 유틸 (이 블록의 함수명은 고유하게 바꿨습니다: _safe_* 로 시작) ----------
+def _safe_as_range(sel):
+    """
+    streamlit.date_input 등의 반환값을 (start, end) 튜플로 표준화합니다.
+    - 단일 date/datetime  -> (x, x)
+    - tuple/list 길이 1   -> (x, x)
+    - tuple/list 길이 >=2 -> (첫째, 둘째)
+    - None/빈 시퀀스      -> (None, None)
+    """
+    if sel is None:
+        return (None, None)
+    if isinstance(sel, (tuple, list)):
+        seq = list(sel)
+        if len(seq) >= 2:
+            return (seq[0], seq[1])
+        if len(seq) == 1:
+            return (seq[0], seq[0])
+        return (None, None)
+    # 단일 스칼라(date/datetime 등)
+    return (sel, sel)
 
-# ── (교체) 실적 기간 모드: 가로 라디오, (O) 느낌
+def _safe_same_date_last_year(d: date) -> date:
+    try:
+        return d.replace(year=d.year - 1)
+    except Exception:
+        # 2/29 등 예외
+        return d - timedelta(days=365)
+
+def _safe_prev_year_same_date_range(rng):
+    s, e = _safe_as_range(rng)
+    if s is None or e is None:
+        return (None, None)
+    return (_safe_same_date_last_year(s), _safe_same_date_last_year(e))
+
+def _safe_prev_year_same_weekday_range(rng):
+    s, e = _safe_as_range(rng)
+    if s is None or e is None:
+        return (None, None)
+    # 요일 정렬: 52주(=364일) 이전
+    return (s - timedelta(days=364), e - timedelta(days=364))
+
+def _safe_norm_tuple(sel):
+    return _safe_as_range(sel)
+
+def _to_ts_or_none(d):
+    """date/datetime/None -> pandas.Timestamp 또는 None"""
+    if d is None:
+        return None
+    try:
+        return pd.to_datetime(d)
+    except Exception:
+        return None
+
+# ① 예측 기간
+default_right_start = date(2025, 9, 24)
+default_right_end   = date(2025, 9, 30)
+right_range = st.session_state.get("right_range", (default_right_start, default_right_end))
+
+right_sel_raw = st.sidebar.date_input(
+    "① 예측 기간 (YYYY-MM-DD)",
+    value=right_range,
+    min_value=FCT_START.date(),
+    max_value=FCT_END.date(),
+    key="right_picker_sidebar"
+)
+# ✅ 시작일만 선택된 중간상태도 방어
+right_sel = _safe_as_range(right_sel_raw)
+
+# === ② 실적 기간 입력 (라디오보다 위에, 모드에 따라 enable/disable/표시값 제어) ===
 mode_options = ["사용 안함 (예측만)", "전년도 동일(일자)", "전년도 동일(요일)", "사용자 지정"]
+
+# 최초 진입 시 기본 모드 = 사용자 지정
+if "left_mode_sidebar" not in st.session_state:
+    st.session_state["left_mode_sidebar"] = "사용자 지정"
+
+# 현재 모드(라디오 렌더 전 임시 참조)
+_current_mode = st.session_state["left_mode_sidebar"]
+
+# 모드별 표시값과 disabled 결정
+if _current_mode == "사용 안함 (예측만)":
+    st.sidebar.text_input("② 실적 기간 (YYYY-MM-DD)", value="", disabled=True, placeholder="")
+    computed_left_range = None
+    left_disabled = True
+
+elif _current_mode == "전년도 동일(일자)":
+    computed_left_range = _safe_prev_year_same_date_range(right_sel)
+    s, e = computed_left_range
+    if s is not None and e is not None:
+        s = max(s, ACT_START.date()); e = min(e, ACT_END.date())
+        computed_left_range = (s, e)
+    st.sidebar.date_input(
+        "② 실적 기간 (YYYY-MM-DD)",
+        value=computed_left_range if computed_left_range is not None else (None, None),
+        min_value=ACT_START.date(),
+        max_value=ACT_END.date(),
+        key="left_picker_sidebar_locked_same_date",
+        disabled=True,
+    )
+    if computed_left_range is not None:
+        st.session_state["left_range"] = computed_left_range
+    left_disabled = True
+
+elif _current_mode == "전년도 동일(요일)":
+    computed_left_range = _safe_prev_year_same_weekday_range(right_sel)
+    s, e = computed_left_range
+    if s is not None and e is not None:
+        s = max(s, ACT_START.date()); e = min(e, ACT_END.date())
+        computed_left_range = (s, e)
+    st.sidebar.date_input(
+        "② 실적 기간 (YYYY-MM-DD)",
+        value=computed_left_range if computed_left_range is not None else (None, None),
+        min_value=ACT_START.date(),
+        max_value=ACT_END.date(),
+        key="left_picker_sidebar_locked_same_weekday",
+        disabled=True,
+    )
+    if computed_left_range is not None:
+        st.session_state["left_range"] = computed_left_range
+    left_disabled = True
+
+else:  # "사용자 지정"
+    default_left_range = st.session_state.get("left_range", (date(2024, 9, 24), date(2024, 9, 30)))
+    left_sel_raw = st.sidebar.date_input(
+        "② 실적 기간 (YYYY-MM-DD)",
+        value=default_left_range,
+        min_value=ACT_START.date(),
+        max_value=ACT_END.date(),
+        key="left_picker_sidebar",
+        disabled=False,
+    )
+    # ✅ 단일 날짜 선택 중간상태 방어
+    left_sel = _safe_as_range(left_sel_raw)
+    st.session_state["left_range"] = left_sel
+    left_disabled = False
+
+# === 실적 기간 모드 라디오 (가로) ===
 st.sidebar.markdown(
     """
     <style>
-    /* 사이드바 라디오를 가로로 보기 좋게 */
     [data-testid="stSidebar"] [role="radiogroup"] { gap: 10px !important; }
     [data-testid="stSidebar"] [data-baseweb="radio"] { margin-right: 8px !important; }
     [data-testid="stSidebar"] [data-baseweb="radio"] label p { font-weight: 600 !important; }
     </style>
-    """, unsafe_allow_html=True
+    """,
+    unsafe_allow_html=True
 )
+
 left_mode = st.sidebar.radio(
-    "② 실적 기간 모드",
+    "③ 실적 기간 모드",
     options=mode_options,
-    index=1,
+    index=mode_options.index(st.session_state["left_mode_sidebar"]),
     key="left_mode_sidebar",
-    horizontal=True,  # ← 가로 배치
+    horizontal=True,
 )
-
-
-if left_mode == "사용자 지정":
-    left_range = st.session_state.get("left_range", (date(2024, 9, 1), date(2024, 9, 7)))
-    left_sel = st.sidebar.date_input(
-        "실적 기간 (YYYY-MM-DD)",
-        value=left_range, min_value=ACT_START.date(), max_value=ACT_END.date(), key="left_picker_sidebar"
-    )
-
 
 # ================= 기간 정규화/동기화 =================
-def norm_tuple(sel):
-    return sel if isinstance(sel, tuple) else (sel, sel)
+# 예측 기간: (start, end) 보장 + Timestamp 변환 + 범위 클램핑
+r_s_raw, r_e_raw = _safe_norm_tuple(right_sel)
+r_s, r_e = _to_ts_or_none(r_s_raw), _to_ts_or_none(r_e_raw)
 
-r_s, r_e = map(pd.to_datetime, norm_tuple(right_sel))
+# 기본값/안전값 대입 (혹시 None이면 예측 전체 범위의 시작/끝으로)
+if r_s is None: r_s = FCT_START
+if r_e is None: r_e = FCT_END
 r_s, r_e = ensure_in_range(r_s, r_e, FCT_START, FCT_END)
-N_days = (r_e - r_s).days + 1
+N_days = max(1, (r_e - r_s).days + 1)
 
+# 실적 기간 계산
 if left_mode == "사용 안함 (예측만)":
     l_s, l_e = None, None
+
 elif left_mode == "전년도 동일(일자)":
-    l_s = (r_s - pd.DateOffset(years=1)).normalize(); l_e = l_s + pd.Timedelta(days=N_days-1)
+    l_s = (r_s - pd.DateOffset(years=1)).normalize()
+    l_e = l_s + pd.Timedelta(days=N_days-1)
     l_s, l_e = ensure_in_range(l_s, l_e, ACT_START, ACT_END)
+
 elif left_mode == "전년도 동일(요일)":
     l_s, l_e = align_last_year_same_weekday(r_s, N_days)
+
 else:
-    l_s, l_e = map(pd.to_datetime, norm_tuple(left_sel))
+    # 사용자 지정(이미 st.session_state["left_range"]가 튜플임)
+    left_sel_range = st.session_state.get("left_range", None)
+    _ls, _le = _safe_norm_tuple(left_sel_range)
+    l_s, l_e = _to_ts_or_none(_ls), _to_ts_or_none(_le)
+    if l_s is None or l_e is None:
+        # 예외적으로 None이 들어오면 실적 기간을 예측 기간 길이에 맞춰 전년도 동일(일자)로 보정
+        l_s = (r_s - pd.DateOffset(years=1)).normalize()
+        l_e = l_s + pd.Timedelta(days=N_days-1)
     l_s, l_e, r_s, r_e = force_same_length(l_s, l_e, r_s, r_e)
 
+# 상태 저장 (세션)
 st.session_state["right_range"] = (r_s.date(), r_e.date())
 if left_mode == "사용자 지정" and l_s is not None:
     st.session_state["left_range"] = (l_s.date(), l_e.date())
+
+
 
 # ================= 외부 데이터 로드 =================
 actual_df_all   = load_actual_df()
@@ -455,17 +575,83 @@ if not df_sel.empty:
     df_sel["x_cat"] = df_sel.apply(lambda r: f"{'실적' if r['period']=='실적기간' else '예측'}|{r['date'].strftime('%Y-%m-%d')}", axis=1)
 
 # =================== 그래프 패널(분리) ===================
+# =================== 그래프 패널(분리) ===================
+# =================== 그래프 패널(분리) ===================
 st.markdown('<div class="panel">', unsafe_allow_html=True)
 st.subheader("📊그래프")
 
-sp, cSales, cPax = st.columns([8,1.6,1.6])
-with cSales: show_sales = st.checkbox("매출액", True, key="cb_sales")
-with cPax:   show_pax   = st.checkbox("승객수", True, key="cb_pax")
+# --- 커스텀 범례 스타일 정의 ---
+st.markdown(
+    """
+    <style>
+    .legend-inline {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        vertical-align: middle;
+        margin-left: 8px;
+    }
+    .legend-bar {
+        width: 18px;
+        height: 10px;
+        background-color: rgba(52, 152, 219, 0.75); /* 막대색 (파랑) */
+        border-radius: 2px;
+        display: inline-block;
+    }
+    .legend-line {
+        width: 22px;
+        height: 2px;
+        background-color: rgba(231, 76, 60, 0.9); /* 꺾은선 색 (빨강) */
+        position: relative;
+        display: inline-block;
+    }
+    .legend-line::after {
+        content: "";
+        position: absolute;
+        top: -3px;
+        left: 7px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background-color: rgba(231, 76, 60, 0.9);
+    }
+    </style>
+    """, unsafe_allow_html=True
+)
+
+# --- 체크박스 + 범례 (세로 정렬: 위=매출액, 아래=승객수) ---
+# 기존 sp, cSales, cPax = st.columns([8, 2, 2]) 블록을 아래로 교체
+sp, cRight = st.columns([8, 2])
+
+with cRight:
+    # 1) 위: 매출액 (체크박스 + 범례)  ← 기존 '승객수'가 있던 오른쪽 영역의 맨 위 자리로 이동
+    row1_chk, row1_legend = st.columns([1.2, 0.8])
+    with row1_chk:
+        show_sales = st.checkbox("매출액", True, key="cb_sales")
+    with row1_legend:
+        st.markdown(
+            """<span class='legend-inline'><span class='legend-line'></span></span>""",
+            unsafe_allow_html=True
+        )
+
+    # 2) 아래: 승객수 (체크박스 + 범례)
+    row2_chk, row2_legend = st.columns([1.2, 0.8])
+    with row2_chk:
+        show_pax = st.checkbox("승객수", True, key="cb_pax")
+    with row2_legend:
+        st.markdown(
+            """<span class='legend-inline'><span class='legend-bar'></span></span>""",
+            unsafe_allow_html=True
+        )
+
+
+# 이하 그래프 생성 코드는 그대로 유지
+
 
 def _add_watermark(fig, text: str):
     # 투명도 있는 워터마크 (레이어: below)
     fig.add_annotation(
-        x=0.5, y=0.5, xref="paper", yref="paper",
+        x=0.5, y=0.2, xref="paper", yref="paper",
         text=text, showarrow=False,
         font=dict(size=48, color="rgba(0,0,0,0.08)"),
         align="center", opacity=1.0
@@ -538,7 +724,12 @@ if left_plot_df.empty:
 else:
     colL, colR = st.columns(2)
     with colL:
-        st.markdown("**✅실적**")
+        st.markdown(
+    "<p style='margin-left: 20px; font-size: 20px; font-weight: 700;'>✅ 실적</p>",
+    unsafe_allow_html=True
+)
+
+
         fig_left = _build_single_fig(left_plot_df, "실적")
         st.plotly_chart(
             fig_left, use_container_width=True,
@@ -547,7 +738,11 @@ else:
                         modeBarButtonsToAdd=["hovercompare"])
         )
     with colR:
-        st.markdown("**✅예측**")
+        st.markdown(
+    "<p style='margin-left: 20px; font-size: 20px; font-weight: 700;'>✅ 예측</p>",
+    unsafe_allow_html=True
+)
+
         fig_right = _build_single_fig(right_plot_df, "예측")
         st.plotly_chart(
             fig_right, use_container_width=True,
@@ -663,7 +858,9 @@ if "예측|승객수(천명(Δ))" in table_df.columns:
 if "예측|휴무여부" in table_df.columns: sum_row["예측|휴무여부"] = ""
 if "예측|휴일명(풀)" in table_df.columns: sum_row["예측|휴일명(풀)"] = ""
 
+
 # ======== 매트릭스 렌더링 (실적/예측 분리) ========
+st.divider()   # 얇은 구분선 + 간격
 st.markdown("#### 📋 데이터 표")
 
 # ---- 실적/예측 매트릭스 생성 함수 (동일)
@@ -686,37 +883,54 @@ def _build_left_matrix() -> pd.DataFrame:
 def _build_right_matrix() -> pd.DataFrame:
     if right_tbl.empty:
         return pd.DataFrame()
-    def _delta_str(pct):
-        if pd.isna(pct): return ""
-        return f" ({'▲' if pct>=0 else '▼'}{abs(pct):.1f}%)"
+
     rows = {}
+
+    # 매출액 본값
     if st.session_state.get("cb_sales", True) and "sales_million" in right_tbl:
-        vals = right_tbl["sales_million"]
-        pcts = merged_tbl["sales_pct"] if "sales_pct" in merged_tbl.columns else pd.Series([pd.NA]*len(vals))
-        rows["매출액(백만원)|예측(Δ)"] = [
-            ("" if pd.isna(v) else f"{int(round(v)):,.0f}") + _delta_str(p)
-            for v, p in zip(vals, pcts)
+        vals_sales = right_tbl["sales_million"]
+        rows["매출액(백만원)|예측"] = [
+            "" if pd.isna(v) else f"{int(round(v)):,.0f}" for v in vals_sales
         ]
+
+        # 매출액 증감율(%)
+        pcts_sales = merged_tbl["sales_pct"] if "sales_pct" in merged_tbl.columns else pd.Series([pd.NA] * len(vals_sales))
+        rows["매출액 증감율(%)|예측"] = [
+            "" if pd.isna(p) else f"{p:.1f}%" for p in pcts_sales
+        ]
+
+    # 승객수 본값
     if st.session_state.get("cb_pax", True) and "passengers_k" in right_tbl:
-        vals = right_tbl["passengers_k"]
-        pcts = merged_tbl["pax_pct"] if "pax_pct" in merged_tbl.columns else pd.Series([pd.NA]*len(vals))
-        rows["승객수(천명)|예측(Δ)"] = [
-            ("" if pd.isna(v) else f"{int(round(v)):,.0f}") + _delta_str(p)
-            for v, p in zip(vals, pcts)
+        vals_pax = right_tbl["passengers_k"]
+        rows["승객수(천명)|예측"] = [
+            "" if pd.isna(v) else f"{int(round(v)):,.0f}" for v in vals_pax
         ]
+
+        # 승객수 증감율(%)
+        pcts_pax = merged_tbl["pax_pct"] if "pax_pct" in merged_tbl.columns else pd.Series([pd.NA] * len(vals_pax))
+        rows["승객수 증감율(%)|예측"] = [
+            "" if pd.isna(p) else f"{p:.1f}%" for p in pcts_pax
+        ]
+
     df = pd.DataFrame.from_dict(rows, orient="index", columns=fmt_date_ko(right_tbl["date"]))
+
+    # 합계 컬럼: 본값만 합계 계산, 증감율은 공란
     sum_col = []
     for idx in df.index:
-        if idx.startswith("매출액"):
+        name = str(idx)
+        if name.startswith("매출액("):
             s = pd.to_numeric(right_tbl.get("sales_million"), errors="coerce").sum(min_count=1)
             sum_col.append("" if pd.isna(s) else f"{int(round(s)):,.0f}")
-        elif idx.startswith("승객수"):
+        elif name.startswith("승객수("):
             s = pd.to_numeric(right_tbl.get("passengers_k"), errors="coerce").sum(min_count=1)
             sum_col.append("" if pd.isna(s) else f"{int(round(s)):,.0f}")
         else:
+            # 증감율(%) 행 등은 합계 없음
             sum_col.append("")
     df.insert(0, "합계", sum_col)
     return df
+ 
+       
 
 left_matrix  = _build_left_matrix()
 right_matrix = _build_right_matrix()
@@ -764,6 +978,47 @@ if not left_T.empty and not left_tbl.empty:
     for c in num_cols:
         left_T[c] = left_T[c].apply(_fmt_commas)
 
+# === [추가] 컬럼명 정리 & (좌측=실적) 컬럼 순서 재정렬 ===
+def _clean_colnames(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    rename_map = {}
+    for c in df.columns:
+        nc = str(c)
+        # 1) ' |실적 ' / ' |예측 ' 문자열 제거 (Δ는 유지)
+        nc = nc.replace("|실적", "").replace("|예측", "")
+        # 2) '휴일' → '휴일명', '선택' → '자세히'
+        #    (주의: '휴일명'으로 이미 바뀐 경우 중복 치환 방지)
+        if nc == "휴일":
+            nc = "휴일명"
+        if nc == "선택":
+            nc = "자세히"
+        rename_map[c] = nc
+    return df.rename(columns=rename_map)
+
+left_T  = _clean_colnames(left_T)
+right_T = _clean_colnames(right_T)
+
+# 2) 실적 테이블(left_T) 컬럼 순서: 매출액 → 승객수 → 휴일명 → 외부요인 → 자세히 → (그 외)
+if left_T is not None and not left_T.empty:
+    cols = list(left_T.columns)
+
+    # 같은 접두를 가진 컬럼이 여러 개여도 순서대로 모두 포함
+    def _take_prefix(prefix: str):
+        return [c for c in cols if str(c).startswith(prefix)]
+
+    order = []
+    order += _take_prefix("매출액")   # 매출액*
+    order += _take_prefix("승객수")   # 승객수*
+    for fixed in ["휴일명", "외부요인", "자세히"]:
+        if fixed in cols and fixed not in order:
+            order.append(fixed)
+
+    # 나머지(이미 선택된 컬럼 제외)
+    rest = [c for c in cols if c not in order]
+    left_T = left_T[order + rest]
+
+
 # ==== 예측기간(전치): 휴일 컬럼만 맨 끝에 ====
 if not right_T.empty and not right_tbl.empty:
     def _append_aligned_column(T: pd.DataFrame, dates: pd.Series, values: list, col_name: str):
@@ -783,6 +1038,51 @@ if not right_T.empty and not right_tbl.empty:
         right_T["휴일"] = _col
     else:
         right_T = _append_aligned_column(right_T, right_tbl["date"], right_holiday_labels2, "휴일")
+
+# ==== 예측기간(전치): 휴일 컬럼만 맨 끝에 ====
+if not right_T.empty and not right_tbl.empty:
+    def _append_aligned_column(T: pd.DataFrame, dates: pd.Series, values: list, col_name: str):
+        if T is None or T.empty: return T
+        date_labels = list(fmt_date_ko(pd.Series(dates)))
+        mapping = {lbl: val for lbl, val in zip(date_labels, values)}
+        aligned = []
+        for idx in T.index:
+            aligned.append("" if str(idx) == "합계" else mapping.get(idx, ""))
+        T[col_name] = aligned
+        return T
+
+    if "휴무" in right_T.columns:
+        right_T = right_T.drop(columns=["휴무"])
+
+    right_holiday_labels2, _ = build_holiday_labels(pd.DatetimeIndex(right_tbl["date"]), holidays_df, max_len=6)
+    if "휴일" in right_T.columns:
+        _col = right_T.pop("휴일")
+        right_T["휴일"] = _col
+    else:
+        right_T = _append_aligned_column(right_T, right_tbl["date"], right_holiday_labels2, "휴일")
+
+# === [추가] 예측 테이블 컬럼명/순서 정리 (휴일 추가 직후에 배치하세요) ===
+def _clean_and_order_pred(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    # 1) 이름 정리
+    rename_map = {}
+    for c in df.columns:
+        nc = str(c)
+        nc = nc.replace("|예측(Δ)", "").replace("|예측", "")
+        if nc == "휴일":
+            nc = "휴일명"
+        rename_map[c] = nc
+    df = df.rename(columns=rename_map)
+
+    # 2) 순서 고정
+    wanted = ["매출액(백만원)", "승객수(천명)", "매출액 증감율(%)", "승객수 증감율(%)", "휴일명"]
+    ordered = [c for c in wanted if c in df.columns]
+    rest = [c for c in df.columns if c not in ordered]
+    return df[ordered + rest]
+
+right_T = _clean_and_order_pred(right_T)
+
 
 # ==== (중요) 최초 진입/기간 변경 시 이벤트 맵 선생성 ====
 @st.cache_data(show_spinner=False)
@@ -1104,10 +1404,13 @@ def _style_weekend_rows(df: pd.DataFrame) -> Styler:
             sty = sty.set_properties(subset=([idx], df.columns), **{"color": red_text})
     return sty
 
-# ---- 출력 (전치표 + 체크박스 + 선택된 일자 이벤트) ----
+st.markdown("<br>", unsafe_allow_html=True) # ---- 출력 (전치표 + 체크박스 + 선택된 일자 이벤트) ----
 c1, c2 = st.columns(2)
 with c1:
-    st.markdown("**✅실적**")
+    st.markdown(
+    "<p style='margin-left: 20px; font-size: 20px; font-weight: 700;'>✅ 실적</p>",
+    unsafe_allow_html=True
+)
     if left_T.empty:
         st.info("실적 기간 데이터가 없습니다.")
     else:
@@ -1137,7 +1440,10 @@ with c1:
         st.session_state["selected_event_dates_from_matrix"] = edited_left.loc[selected_mask, "일자"].tolist()
 
 with c2:
-    st.markdown("**✅예측**")
+    st.markdown(
+    "<p style='margin-left: 20px; font-size: 20px; font-weight: 700;'>✅ 예측</p>",
+    unsafe_allow_html=True
+)
     if right_T.empty:
         st.info("예측 기간 데이터가 없습니다.")
     else:
@@ -1146,7 +1452,7 @@ with c2:
                      height=min(520, 140 + 28 * max(3, len(right_T))))
 
 # ===================== 🔎 외부요인 상세보기 (전체 폭) =====================
-st.markdown("#### 🔎 외부요인 상세보기")
+st.markdown("#### 🔎 외부요인 자세히보기")
 
 def _label_to_date(lbl: str):
     try:
@@ -1232,7 +1538,7 @@ else:
 
 
 
-
+st.divider() 
 # ===================== 9월 예측 정확도 (실적 vs 예측) =====================
 st.markdown("#### 🎯 예측 정확도 (실적 vs 예측)")
 
@@ -1372,7 +1678,6 @@ def _weekday_textcolor_only_df(_df: pd.DataFrame) -> pd.DataFrame:
         styles.loc[0, :] = [f"font-weight:bold; background-color:{SUM_BG};"] * styles.shape[1]
     return styles
 
-# ==== 🎯 예측 정확도 표 수정 ====
 
 # ==== 🎯 예측 정확도 표 수정 ====
 
@@ -1428,10 +1733,14 @@ def _weekday_textcolor_only_df(_df: pd.DataFrame) -> pd.DataFrame:
         styles.loc[0, :] = [f"font-weight:bold; background-color:{SUM_BG};"] * styles.shape[1]
     return styles
 
+st.markdown("<br>", unsafe_allow_html=True) 
 # 두 표 나란히 출력
 col1, col2 = st.columns(2)
 with col1:
-    st.markdown("**💰 매출액**")
+    st.markdown(
+    "<p style='margin-left: 20px; font-size: 20px; font-weight: 700;'>✅ 매출액</p>",
+    unsafe_allow_html=True
+)
     st.dataframe(
         disp_sales.style
             .set_properties(**{"text-align":"center"})
@@ -1441,7 +1750,10 @@ with col1:
         height=min(520, 120 + 28 * (len(disp_sales)+1))
     )
 with col2:
-    st.markdown("**🚆 승객수**")
+    st.markdown(
+    "<p style='margin-left: 20px; font-size: 20px; font-weight: 700;'>✅ 승객수</p>",
+    unsafe_allow_html=True
+)
     st.dataframe(
         disp_pax.style
             .set_properties(**{"text-align":"center"})
