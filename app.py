@@ -19,7 +19,7 @@ except Exception as _e:
     AgGrid = None
 
 # ================= 기본 설정 =================
-st.set_page_config(page_title="외부요인 기반 빅데이터 철도 수요예측 플랫폼", layout="wide")
+st.set_page_config(page_title="외부요인 기반 빅데이터 철도 수요예측 플랫폼", layout="wide",initial_sidebar_state="expanded")
 
 # ======= 상단 타이틀 (다크모드 제거) =======
 st.title("📈 외부요인 기반 빅데이터 철도 수요예측 플랫폼")
